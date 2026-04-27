@@ -317,31 +317,97 @@ async def pipe(ctx):
 
 @bot.command()
 async def weather(ctx, target_zip: str = None):
-    gid = str(ctx.guild.id)
-    cfg = servers_db.get(gid, {})
+    guild_id_str = str(ctx.guild.id)
+    cfg = servers_db.get(guild_id_str, {})
     zu = target_zip or cfg.get("zip_code")
     if not zu: return await ctx.send("Usage: `fco!weather <ZIP>`")
     v = cfg.get("voice", DEFAULT_VOICE)
-    await ctx.send(f"🔍 Fetching forecast for {zu}...")
+    await ctx.send(f"🔍 Fetching detailed 7-day forecast and HWO for {zu}... 📡")
+    
+    headers = {"User-Agent": "EASBot", "Accept": "application/geo+json"}
     try:
+        # 1. Lookup ZIP
         zres = requests.get(f"http://api.zippopotam.us/us/{zu}").json()
         lat, lon = zres['places'][0]['latitude'], zres['places'][0]['longitude']
         pn = f"{zres['places'][0]['place name']}, {zres['places'][0]['state abbreviation']}"
-        pres = requests.get(f"https://api.weather.gov/points/{lat},{lon}", headers={"User-Agent": "EASBot"}).json()
+        
+        # 2. Get NWS points
+        pres = requests.get(f"https://api.weather.gov/points/{lat},{lon}", headers=headers).json()
         furl, cwa = pres['properties']['forecast'], pres['properties']['cwa']
-        periods = requests.get(furl, headers={"User-Agent": "EASBot"}).json()['properties']['periods']
-        txt, spoken = "", f"Detailed forecast for {pn}. "
+        hwo_url = f"https://api.weather.gov/products/types/HWO/locations/{cwa}"
+        
+        # 3. Fetch Forecast
+        periods = requests.get(furl, headers=headers).json()['properties']['periods']
+        forecast_text_blocks = []
+        spoken_text = f"Detailed forecast for {pn}. "
+        current_block = ""
         for p in periods:
             line = f"**{p['name']}**: {p['detailedForecast']}\n"
-            if len(txt) + len(line) < 1900: txt += line
-            spoken += f"{p['name']}. {p['detailedForecast']} "
-        spoken += " For the latest information, go to weather.gov."
-        await ctx.send(embed=discord.Embed(title=f"🌤️ {pn}", description=txt[:2000], color=discord.Color.blue()))
+            if len(current_block) + len(line) > 1800:
+                forecast_text_blocks.append(current_block); current_block = line
+            else: current_block += line
+            spoken_text += f"{p['name']}. {p['detailedForecast']} "
+        if current_block: forecast_text_blocks.append(current_block)
+
+        # 4. Fetch HWO with Fallbacks
+        def parse_hwo_text(t):
+            m = re.search(r'(This hazardous weather outlook|\.DAY ONE.*?|DISCUSSION\.\.\.)', t, re.I)
+            if m:
+                p = re.split(r'\.SPOTTER|\$\$|\&\&', t[m.start():], flags=re.I)[0].strip()
+                return re.sub(r'\s+', ' ', p.replace('\n', ' ').replace('*', ''))
+            return None
+
+        hwo_found, hwo_summary = False, ""
+        
+        # Fallback 1: API
+        hwo_api_res = requests.get(hwo_url, headers=headers, timeout=10)
+        if hwo_api_res.status_code == 200 and hwo_api_res.json().get('@graph'):
+            url = hwo_api_res.json()['@graph'][0]['@id']
+            res_hwo = requests.get(url, headers=headers, timeout=10)
+            parsed = parse_hwo_text(res_hwo.json().get('productText', ''))
+            if parsed:
+                hwo_summary = parsed; spoken_text += " Hazardous Weather Outlook. " + parsed; hwo_found = True
+
+        # Fallback 2: Web Scrape
+        if not hwo_found and cwa:
+            try:
+                from bs4 import BeautifulSoup
+                scrape_res = requests.get(f"https://www.weather.gov/{cwa.lower()}/ghwo", headers=headers, timeout=10)
+                if scrape_res.status_code == 200:
+                    soup = BeautifulSoup(scrape_res.content, 'html.parser')
+                    for table in soup.find_all('table'):
+                        parsed = parse_hwo_text(table.get_text())
+                        if parsed:
+                            hwo_summary = parsed; spoken_text += " Hazardous Weather Outlook. " + parsed; hwo_found = True; break
+            except: pass
+
+        # Fallback 3: AFD Synopsis
+        if not hwo_found:
+            afd_res = requests.get(f"https://api.weather.gov/products/types/AFD/locations/{cwa}", headers=headers, timeout=10)
+            if afd_res.status_code == 200 and afd_res.json().get('@graph'):
+                url = afd_res.json()['@graph'][0]['@id']
+                res_afd = requests.get(url, headers=headers, timeout=10)
+                m = re.search(r'\.(?:KEY MESSAGES|SYNOPSIS)\.\.\.(.*?)\&\&', res_afd.json().get('productText', ''), re.S | re.I)
+                if m:
+                    hwo_summary = re.sub(r'\s+', ' ', m.group(1).replace('\n', ' ').replace('*', '').replace('-', ''))
+                    hwo_summary = re.sub(r'(?:Updated|Revised) at.*?\d{4}', '', hwo_summary, flags=re.I).strip()
+                    spoken_text += " Regional Weather Summary. " + hwo_summary; hwo_found = True
+
+        if not hwo_found: hwo_summary = "No outlook active."
+        spoken_text += " For the latest information, go to weather.gov."
+
+        # Output to Discord
+        for i, block in enumerate(forecast_text_blocks):
+            embed = discord.Embed(title=f"🌤️ 7-Day Forecast: {place_name} ({i+1}/{len(forecast_text_blocks)})", description=block, color=discord.Color.blue())
+            if i == len(forecast_text_blocks) - 1: embed.add_field(name="⚠️ Outlook", value=hwo_summary[:1024], inline=False)
+            await ctx.send(embed=embed)
+            if i < len(forecast_text_blocks) - 1: await asyncio.sleep(10)
+            
         if ctx.voice_client and not ctx.voice_client.is_playing():
             fn = f"{ARCHIVE_DIR}/weather_{gid}_{datetime.now().strftime('%H%M%S')}.mp3"
-            await asyncio.to_thread(generate_normal_speech, spoken, fn, voice=v)
+            await asyncio.to_thread(generate_normal_speech, spoken_text, fn, voice=v)
             ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
-    except Exception as e: print(e); await ctx.send("Error.")
+    except Exception as e: print(f"Weather error: {e}"); await ctx.send("Error fetching weather.")
 
 @bot.command(aliases=['testg'])
 @commands.is_owner()

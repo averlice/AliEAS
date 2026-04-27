@@ -14,9 +14,14 @@ def clean_for_dectalk(text):
     # Replace NWS ellipses with commas for natural pauses
     text = re.sub(r'\.\.\.+', ', ', text)
     
+    # Fix time pronunciation (e.g., "4:40 PM" -> "4 40 PM")
+    # This prevents the engine from saying "four-hundred-forty" or merging them.
+    text = re.sub(r'(\d{1,2}):(\d{2})', r'\1 \2', text)
+    
+    # Ensure space between time and AM/PM if missing (e.g., "4 40PM" -> "4 40 PM")
+    text = re.sub(r'(\d{2})\s?([AP]M)', r'\1 \2', text, flags=re.IGNORECASE)
+    
     # Expand common NWS abbreviations
-    # We must be careful with words that look like state abbreviations (e.g. IN, OR, ME) 
-    # if the text happens to be in ALL CAPS.
     replacements = {
         r'\bNWS\b': 'National Weather Service',
         r'\bmph\b': 'miles per hour',
