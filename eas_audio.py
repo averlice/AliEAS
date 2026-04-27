@@ -97,25 +97,54 @@ def apply_radio_filter(audio_segment):
     # Add clicks at the very start and end
     return click_in + filtered + click_out
 
-def _generate_tom(text, filename):
+def get_available_voices():
+    """Returns a list of available SAPI5 voice names using the 32-bit PS bridge."""
+    import uuid
+    bot_dir = os.path.dirname(os.path.abspath(__file__))
+    ps_script_path = os.path.join(bot_dir, f"temp_list_{uuid.uuid4().hex[:8]}.ps1")
+    
+    ps_script = """
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+foreach ($voice in $synth.GetInstalledVoices()) {
+    if ($voice.Enabled) { Write-Output $voice.VoiceInfo.Name }
+}
+$synth.Dispose()
+"""
+    with open(ps_script_path, "w", encoding="utf-8") as f:
+        f.write(ps_script)
+        
+    ps_exe = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+    try:
+        result = subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], 
+                               capture_output=True, text=True, check=True)
+        voices = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+        return voices
+    except Exception as e:
+        print(f"Error listing voices: {e}")
+        return ["ScanSoft Tom_Full_22kHz"]
+    finally:
+        if os.path.exists(ps_script_path): os.remove(ps_script_path)
+
+def _generate_sapi5(text, filename, voice_name="ScanSoft Tom_Full_22kHz"):
     import uuid
     abs_filename = os.path.abspath(filename)
     cleaned_text = clean_for_dectalk(text)
     
-    # We need to use 32-bit PowerShell because ScanSoft Tom is a 32-bit SAPI5 voice.
-    # Python is 64-bit, so it can't directly access the 32-bit registry keys for this voice.
-    
-    # Use a UUID to ensure this temporary script file is completely unique
-    # and won't be accidentally deleted by another async thread generating audio at the exact same millisecond.
     unique_id = str(uuid.uuid4())[:8]
     ps_script_path = os.path.join(os.path.dirname(abs_filename), f"temp_ps_{os.getpid()}_{unique_id}.ps1")
     
-    # Create the PowerShell script that loads System.Speech and calls Tom
+    # PowerShell script to select voice and speak to file
     ps_script = f"""
 Add-Type -AssemblyName System.Speech
 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $synth.SetOutputToWaveFile('{abs_filename}')
-$synth.SelectVoice('ScanSoft Tom_Full_22kHz')
+try {{
+    $synth.SelectVoice('{voice_name}')
+}} catch {{
+    # Fallback to default if selected voice not found
+    Write-Warning "Voice {voice_name} not found, using default."
+}}
 $synth.Speak('{cleaned_text.replace("'", "''")}')
 $synth.Dispose()
 """
@@ -123,15 +152,13 @@ $synth.Dispose()
         f.write(ps_script)
         
     ps_exe = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
-    
     try:
         subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], check=True)
     finally:
-        if os.path.exists(ps_script_path):
-            os.remove(ps_script_path)
+        if os.path.exists(ps_script_path): os.remove(ps_script_path)
 
-def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None):
-    print(f"Generating audio for text: {text}")
+def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voice="ScanSoft Tom_Full_22kHz"):
+    print(f"Generating audio for text: {text} using voice: {voice}")
     
     # 1. SAME Header
     header_text = "ZCZC-WXR-EAN-008043+0015-1231234-KDEN/NWS-"
@@ -142,9 +169,9 @@ def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None):
     
     # 3. Voice message (with radio filter)
     temp_tts_file = "temp_tts.wav"
-    _generate_tom(text, temp_tts_file)
+    _generate_sapi5(text, temp_tts_file, voice)
     voice_raw = AudioSegment.from_wav(temp_tts_file)
-    voice = apply_radio_filter(voice_raw)
+    voice_filtered = apply_radio_filter(voice_raw)
     
     # 4. EOM
     eom = EASGen.genEOM()
@@ -153,34 +180,31 @@ def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None):
     silence_short = AudioSegment.silent(duration=500)
     silence_long = AudioSegment.silent(duration=1000)
     
-    final_audio = header + silence_short + attention + silence_long + voice + silence_long + eom
+    final_audio = header + silence_short + attention + silence_long + voice_filtered + silence_long + eom
     
-    # 6. Pre-speech (if any, like "Issued by owner")
+    # 6. Pre-speech (if any)
     if pre_speech:
         temp_pre_file = "temp_pre.wav"
-        _generate_tom(pre_speech, temp_pre_file)
+        _generate_sapi5(pre_speech, temp_pre_file, voice)
         pre_voice = apply_radio_filter(AudioSegment.from_wav(temp_pre_file))
         final_audio = pre_voice + silence_long + final_audio
-        if os.path.exists(temp_pre_file):
-            os.remove(temp_pre_file)
+        if os.path.exists(temp_pre_file): os.remove(temp_pre_file)
     
     final_audio.export(output_filename, format="mp3")
-    if os.path.exists(temp_tts_file):
-        os.remove(temp_tts_file)
+    if os.path.exists(temp_tts_file): os.remove(temp_tts_file)
     return output_filename
 
-def generate_normal_speech(text, output_filename="speech.mp3"):
-    print(f"Generating normal speech for text: {text}")
+def generate_normal_speech(text, output_filename="speech.mp3", voice="ScanSoft Tom_Full_22kHz"):
+    print(f"Generating normal speech for text: {text} using voice: {voice}")
     temp_tts_file = "temp_tts_normal.wav"
-    _generate_tom(text, temp_tts_file)
+    _generate_sapi5(text, temp_tts_file, voice)
     voice_raw = AudioSegment.from_wav(temp_tts_file)
     
     # Apply the radio radio atmosphere
-    voice = apply_radio_filter(voice_raw)
+    voice_filtered = apply_radio_filter(voice_raw)
     
     silence = AudioSegment.silent(duration=500)
-    final_audio = silence + voice + silence
+    final_audio = silence + voice_filtered + silence
     final_audio.export(output_filename, format="mp3")
-    if os.path.exists(temp_tts_file):
-        os.remove(temp_tts_file)
+    if os.path.exists(temp_tts_file): os.remove(temp_tts_file)
     return output_filename
