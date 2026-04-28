@@ -56,12 +56,10 @@ async def archive_to_central_repo(title, description, file_path):
     if not channel_id:
         return
         
-    channel = bot.get_channel(int(channel_id))
-    if not channel:
-        print(f"Central Repo Error: Could not find channel {channel_id}")
-        return
-        
     try:
+        # fetch_channel is more reliable than get_channel as it bypasses the cache
+        channel = await bot.fetch_channel(int(channel_id))
+        
         embed = discord.Embed(
             title=f"📦 ARCHIVE: {title}",
             description=description,
@@ -128,7 +126,7 @@ async def require_auth(request):
 
 async def web_index(request):
     await require_auth(request)
-    archive_items = [f for f in sorted(os.listdir(ARCHIVE_DIR), reverse=True) if f.endswith(".mp3")][:20] if os.path.exists(ARCHIVE_DIR) else []
+    archive_items = [f for f in sorted(os.listdir(ARCHIVE_DIR), reverse=True) if f.endswith(".mp3")] if os.path.exists(ARCHIVE_DIR) else []
     archive_html = "".join([f'<li><strong>{i.replace("_", " ")}</strong><br><audio controls src="/archive/{i}"></audio></li><hr>' for i in archive_items]) or "<li>No alerts.</li>"
     html = f"<html><body style='font-family:monospace;background:#121212;color:#00ff00;padding:20px'><h1>EAS ENDEC v{BOT_VERSION}</h1><p>Servers: {len(servers_db)-1}</p><form action='/test' method='post'><button type='submit'>Global Test</button></form><form action='/stop' method='post'><button type='submit'>Stop All</button></form><h2>Archive</h2><ul>{archive_html}</ul></body></html>"
     return web.Response(text=html, content_type='text/html')
@@ -149,6 +147,10 @@ async def trigger_global_test(trigger_source="Web UI"):
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         base_fn = f"{ARCHIVE_DIR}/global_test_alert_{ts}.mp3"
         await asyncio.to_thread(generate_eas_message, msg, base_fn, pre, voice=voice)
+        
+        # Upload to central repository
+        await archive_to_central_repo(f"Global Test Alert", msg, base_fn)
+        
         for gid, cfg in servers_db.items():
             if gid.startswith("__"): continue
             guild = bot.get_guild(int(gid))
@@ -216,12 +218,24 @@ async def on_command_error(ctx, error):
     else: print(f"Error: {error}")
 
 @bot.command()
+@commands.is_owner()
+async def archive(ctx, channel_id: str = None):
+    """(Owner Only) Sets the central Discord channel for archiving all alert audio."""
+    if not channel_id:
+        await ctx.send("Usage: `fco!archive <channel_id>`")
+        return
+        
+    servers_db["__global__"]["archive_channel_id"] = channel_id
+    save_db(servers_db)
+    await ctx.send(f"✅ Central Alert Repository set to channel: <#{channel_id}>")
+
+@bot.command()
 async def help(ctx):
     embed = discord.Embed(title="📡 AliEAS v1.0", color=discord.Color.blue())
     embed.add_field(name="🎙️ General", value="`fco!join`, `fco!leave`, `fco!active`, `fco!history`, `fco!weather [ZIP]`, `fco!stop`, `fco!status`, `fco!voices`, `fco!voice`", inline=False)
     embed.add_field(name="⚙️ Admin", value="`fco!setup <ZIP>`, `fco!test`, `fco!setvoice <Name>`", inline=False)
     if await bot.is_owner(ctx.author):
-        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice <Name>`", inline=False)
+        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice <Name>`", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -298,9 +312,14 @@ async def test(ctx):
     voice = cfg.get("voice", DEFAULT_VOICE)
     try:
         ts = datetime.now().strftime("%Y%M%S")
-        fn = f"{ARCHIVE_DIR}/test_{gid}_{ts}.mp3"
-        await asyncio.to_thread(generate_eas_message, msg, fn, "This voice channel has been interrupted for the Emergency Alert System.", voice=voice)
-        vc.play(discord.FFmpegPCMAudio(source=fn))
+        filename = f"{ARCHIVE_DIR}/test_{gid}_{ts}.mp3"
+        await asyncio.to_thread(generate_eas_message, msg, filename, "This voice channel has been interrupted for the Emergency Alert System.", voice=voice)
+        
+        # Upload to central repository
+        await archive_to_central_repo(f"Test Alert ({gid})", msg, filename)
+        
+        vc.play(discord.FFmpegPCMAudio(source=filename))
+        await ctx.send("Now playing the test message.")
     except Exception as e: await ctx.send(f"Error: {e}")
 
 @bot.command()
@@ -329,6 +348,10 @@ async def pipe(ctx):
         final = await asyncio.to_thread(compile)
         base_fn = f"{ARCHIVE_DIR}/pipe_base_{ts}.mp3"
         await asyncio.to_thread(final.export, base_fn, format="mp3")
+        
+        # Upload to central repository
+        await archive_to_central_repo(f"Manual Pipe Broadcast", "Manual audio broadcast issued by system administrator.", base_fn)
+        
         import shutil
         for gid, cfg in servers_db.items():
             if gid.startswith("__"): continue
@@ -431,6 +454,10 @@ async def weather(ctx, target_zip: str = None):
         if ctx.voice_client and not ctx.voice_client.is_playing():
             fn = f"{ARCHIVE_DIR}/weather_{guild_id_str}_{datetime.now().strftime('%H%M%S')}.mp3"
             await asyncio.to_thread(generate_normal_speech, spoken_text, fn, voice=v)
+            
+            # Upload to central repository
+            await archive_to_central_repo(f"Weather Forecast ({place_name})", spoken_text, fn)
+            
             ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
     except Exception as e: print(f"Weather error: {e}"); await ctx.send("Error fetching weather.")
 
@@ -498,8 +525,12 @@ async def check_nws_alerts():
                             if vc and vc.is_connected() and not vc.is_playing() and new_alerts:
                                 a = new_alerts[0]
                                 speech = f"Alert: {a.get('headline')}. {a.get('description')}"
-                                fn = f"{ARCHIVE_DIR}/alert_{gid}_{datetime.now().strftime('%H%M%S')}.mp3"
+                                fn = f"{ARCHIVE_DIR}/alert_{aid.split('.')[-1]}_{gid}_{datetime.now().strftime('%H%M%S')}.mp3"
                                 await asyncio.to_thread(generate_eas_message, speech, fn, "Interruption for EAS.", voice=cfg.get("voice", DEFAULT_VOICE))
+                                
+                                # Upload to central repository
+                                await archive_to_central_repo(f"REAL ALERT ({cfg.get('place_name', zone)})", speech, fn)
+                                
                                 vc.play(discord.FFmpegPCMAudio(source=fn))
             except: pass
     for gid, cfg in servers_db.items():
