@@ -37,17 +37,42 @@ def load_db():
             try:
                 data = json.load(f)
                 if "__global__" not in data:
-                    data["__global__"] = {"voice": DEFAULT_VOICE}
+                    data["__global__"] = {"voice": DEFAULT_VOICE, "archive_channel_id": None}
                 return data
             except json.JSONDecodeError:
-                return {"__global__": {"voice": DEFAULT_VOICE}}
-    return {"__global__": {"voice": DEFAULT_VOICE}}
+                return {"__global__": {"voice": DEFAULT_VOICE, "archive_channel_id": None}}
+    return {"__global__": {"voice": DEFAULT_VOICE, "archive_channel_id": None}}
 
 def save_db(data):
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
 servers_db = load_db()
+
+# --- Central Repository Helper ---
+async def archive_to_central_repo(title, description, file_path):
+    """Uploads an alert and its audio to the central Discord repository."""
+    channel_id = servers_db.get("__global__", {}).get("archive_channel_id")
+    if not channel_id:
+        return
+        
+    channel = bot.get_channel(int(channel_id))
+    if not channel:
+        print(f"Central Repo Error: Could not find channel {channel_id}")
+        return
+        
+    try:
+        embed = discord.Embed(
+            title=f"📦 ARCHIVE: {title}",
+            description=description,
+            color=discord.Color.dark_grey(),
+            timestamp=datetime.now()
+        )
+        file = discord.File(file_path)
+        await channel.send(embed=embed, file=file)
+        print(f"Successfully archived {title} to Discord channel {channel_id}")
+    except Exception as e:
+        print(f"Central Repo Error: {e}")
 
 # Configure bot
 intents = discord.Intents.default()
@@ -329,17 +354,17 @@ async def weather(ctx, target_zip: str = None):
         # 1. Lookup ZIP
         zres = requests.get(f"http://api.zippopotam.us/us/{zu}").json()
         lat, lon = zres['places'][0]['latitude'], zres['places'][0]['longitude']
-        pn = f"{zres['places'][0]['place name']}, {zres['places'][0]['state abbreviation']}"
-        
+        place_name = f"{zres['places'][0]['place name']}, {zres['places'][0]['state abbreviation']}"
+
         # 2. Get NWS points
         pres = requests.get(f"https://api.weather.gov/points/{lat},{lon}", headers=headers).json()
         furl, cwa = pres['properties']['forecast'], pres['properties']['cwa']
         hwo_url = f"https://api.weather.gov/products/types/HWO/locations/{cwa}"
-        
+
         # 3. Fetch Forecast
         periods = requests.get(furl, headers=headers).json()['properties']['periods']
         forecast_text_blocks = []
-        spoken_text = f"Detailed forecast for {pn}. "
+        spoken_text = f"Detailed forecast for {place_name}. "
         current_block = ""
         for p in periods:
             line = f"**{p['name']}**: {p['detailedForecast']}\n"
@@ -404,7 +429,7 @@ async def weather(ctx, target_zip: str = None):
             if i < len(forecast_text_blocks) - 1: await asyncio.sleep(10)
             
         if ctx.voice_client and not ctx.voice_client.is_playing():
-            fn = f"{ARCHIVE_DIR}/weather_{gid}_{datetime.now().strftime('%H%M%S')}.mp3"
+            fn = f"{ARCHIVE_DIR}/weather_{guild_id_str}_{datetime.now().strftime('%H%M%S')}.mp3"
             await asyncio.to_thread(generate_normal_speech, spoken_text, fn, voice=v)
             ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
     except Exception as e: print(f"Weather error: {e}"); await ctx.send("Error fetching weather.")
