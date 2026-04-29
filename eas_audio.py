@@ -204,7 +204,7 @@ def generate_voice_with_fallback(text, filename, voice_name, default_voice="Scan
         
     return filename
 
-def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voice="ScanSoft Tom_Full_22kHz"):
+def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voice="ScanSoft Tom_Full_22kHz", intro_path=None, outro_path=None):
     print(f"Generating audio for text: {text} using voice: {voice}")
     
     # 1. SAME Header
@@ -236,12 +236,22 @@ def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voi
         pre_voice = apply_radio_filter(AudioSegment.from_wav(temp_pre_file))
         final_audio = pre_voice + silence_long + final_audio
         if os.path.exists(temp_pre_file): os.remove(temp_pre_file)
+        
+    # 7. Intro Sound (External file)
+    if intro_path and os.path.exists(intro_path):
+        intro_sound = AudioSegment.from_file(intro_path)
+        final_audio = intro_sound + silence_long + final_audio
+        
+    # 8. Outro Sound (External file)
+    if outro_path and os.path.exists(outro_path):
+        outro_sound = AudioSegment.from_file(outro_path)
+        final_audio = final_audio + silence_long + outro_sound
     
     final_audio.export(output_filename, format="mp3")
     if os.path.exists(temp_tts_file): os.remove(temp_tts_file)
     return output_filename
 
-def generate_normal_speech(text, output_filename="speech.mp3", voice="ScanSoft Tom_Full_22kHz"):
+def generate_normal_speech(text, output_filename="speech.mp3", voice="ScanSoft Tom_Full_22kHz", intro_path=None, outro_path=None):
     print(f"Generating normal speech for text: {text} using voice: {voice}")
     temp_tts_file = "temp_tts_normal.wav"
     generate_voice_with_fallback(text, temp_tts_file, voice)
@@ -252,6 +262,17 @@ def generate_normal_speech(text, output_filename="speech.mp3", voice="ScanSoft T
     
     silence = AudioSegment.silent(duration=500)
     final_audio = silence + voice_filtered + silence
+    
+    # Intro Sound (External file)
+    if intro_path and os.path.exists(intro_path):
+        intro_sound = AudioSegment.from_file(intro_path)
+        final_audio = intro_sound + AudioSegment.silent(duration=1000) + final_audio
+        
+    # Outro Sound (External file)
+    if outro_path and os.path.exists(outro_path):
+        outro_sound = AudioSegment.from_file(outro_path)
+        final_audio = final_audio + AudioSegment.silent(duration=1000) + outro_sound
+        
     final_audio.export(output_filename, format="mp3")
     if os.path.exists(temp_tts_file): os.remove(temp_tts_file)
     return output_filename
