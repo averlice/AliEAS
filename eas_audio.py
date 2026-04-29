@@ -131,6 +131,26 @@ $synth.Dispose()
     finally:
         if os.path.exists(ps_script_path): os.remove(ps_script_path)
 
+def _generate_balbolka(text, filename, voice_name):
+    """Generates audio using Balabolka Console (balcon.exe)."""
+    abs_filename = os.path.abspath(filename)
+    cleaned_text = clean_for_dectalk(text)
+    
+    # Get path to balcon.exe
+    balcon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "balabolka")
+    balcon_path = os.path.join(balcon_dir, "balcon.exe")
+    
+    if not os.path.exists(balcon_path):
+        raise FileNotFoundError("Balabolka Console (balcon.exe) not found.")
+        
+    # balcon command: -n (name), -w (wav file), -t (text)
+    try:
+        subprocess.run([balcon_path, "-n", voice_name, "-w", abs_filename, "-t", cleaned_text], check=True, capture_output=True)
+        return True
+    except Exception as e:
+        print(f"Balabolka Error: {e}")
+        return False
+
 def _generate_sapi5(text, filename, voice_name="ScanSoft Tom_Full_22kHz"):
     import uuid
     abs_filename = os.path.abspath(filename)
@@ -140,16 +160,13 @@ def _generate_sapi5(text, filename, voice_name="ScanSoft Tom_Full_22kHz"):
     ps_script_path = os.path.join(os.path.dirname(abs_filename), f"temp_ps_{os.getpid()}_{unique_id}.ps1")
     
     # PowerShell script to select voice and speak to file
+    # We use ErrorAction Stop to ensure failure triggers the fallback
     ps_script = f"""
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $synth.SetOutputToWaveFile('{abs_filename}')
-try {{
-    $synth.SelectVoice('{voice_name}')
-}} catch {{
-    # Fallback to default if selected voice not found
-    Write-Warning "Voice {voice_name} not found, using default."
-}}
+$synth.SelectVoice('{voice_name}')
 $synth.Speak('{cleaned_text.replace("'", "''")}')
 $synth.Dispose()
 """
@@ -158,9 +175,34 @@ $synth.Dispose()
         
     ps_exe = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
     try:
-        subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], check=True)
+        subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], check=True, capture_output=True)
+        return True
+    except Exception as e:
+        print(f"SAPI5 Error for {voice_name}: {e}")
+        return False
     finally:
         if os.path.exists(ps_script_path): os.remove(ps_script_path)
+
+def generate_voice_with_fallback(text, filename, voice_name, default_voice="ScanSoft Tom_Full_22kHz"):
+    """
+    Tries SAPI5 first, then Balabolka.
+    If both fail, it tries the default voice.
+    """
+    # 1. Try SAPI5 with chosen voice
+    if _generate_sapi5(text, filename, voice_name):
+        return filename
+        
+    # 2. Try Balabolka with chosen voice
+    print(f"Falling back to Balabolka for {voice_name}...")
+    if _generate_balbolka(text, filename, voice_name):
+        return filename
+        
+    # 3. Final Fallback: SAPI5 with Default Voice
+    if voice_name != default_voice:
+        print(f"Final Fallback: Using default voice {default_voice}...")
+        _generate_sapi5(text, filename, default_voice)
+        
+    return filename
 
 def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voice="ScanSoft Tom_Full_22kHz"):
     print(f"Generating audio for text: {text} using voice: {voice}")
@@ -172,9 +214,9 @@ def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voi
     # 2. Attention signal
     attention = EASGen.genATTN(8)
     
-    # 3. Voice message (with radio filter)
+    # 3. Voice message (with fallback logic and radio filter)
     temp_tts_file = "temp_tts.wav"
-    _generate_sapi5(text, temp_tts_file, voice)
+    generate_voice_with_fallback(text, temp_tts_file, voice)
     voice_raw = AudioSegment.from_wav(temp_tts_file)
     voice_filtered = apply_radio_filter(voice_raw)
     
@@ -190,7 +232,7 @@ def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voi
     # 6. Pre-speech (if any)
     if pre_speech:
         temp_pre_file = "temp_pre.wav"
-        _generate_sapi5(pre_speech, temp_pre_file, voice)
+        generate_voice_with_fallback(pre_speech, temp_pre_file, voice)
         pre_voice = apply_radio_filter(AudioSegment.from_wav(temp_pre_file))
         final_audio = pre_voice + silence_long + final_audio
         if os.path.exists(temp_pre_file): os.remove(temp_pre_file)
@@ -202,7 +244,7 @@ def generate_eas_message(text, output_filename="alert.mp3", pre_speech=None, voi
 def generate_normal_speech(text, output_filename="speech.mp3", voice="ScanSoft Tom_Full_22kHz"):
     print(f"Generating normal speech for text: {text} using voice: {voice}")
     temp_tts_file = "temp_tts_normal.wav"
-    _generate_sapi5(text, temp_tts_file, voice)
+    generate_voice_with_fallback(text, temp_tts_file, voice)
     voice_raw = AudioSegment.from_wav(temp_tts_file)
     
     # Apply the radio radio atmosphere
