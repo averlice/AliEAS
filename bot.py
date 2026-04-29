@@ -38,13 +38,11 @@ def load_db():
             try:
                 data = json.load(f)
                 if "__global__" not in data:
-                    data["__global__"] = {"voice": DEFAULT_VOICE, "archive_channel_id": None, "intro_path": None}
-                elif "intro_path" not in data["__global__"]:
-                    data["__global__"]["intro_path"] = None
+                    data["__global__"] = {"voice": DEFAULT_VOICE, "archive_channel_id": None}
                 return data
             except json.JSONDecodeError:
-                return {"__global__": {"voice": DEFAULT_VOICE, "archive_channel_id": None, "intro_path": None}}
-    return {"__global__": {"voice": DEFAULT_VOICE, "archive_channel_id": None, "intro_path": None}}
+                return {"__global__": {"voice": DEFAULT_VOICE, "archive_channel_id": None}}
+    return {"__global__": {"voice": DEFAULT_VOICE, "archive_channel_id": None}}
 
 def save_db(data):
     with open(DB_FILE, "w") as f:
@@ -120,11 +118,11 @@ async def trigger_global_test(trigger_source="Web UI"):
     pre = f"This is a test of the E A S discord bot, issued via the {trigger_source}."
     msg = "This is a test of the Emergency Alert System. This is only a test."
     voice = servers_db.get("__global__", {}).get("voice", DEFAULT_VOICE)
-    ipath = servers_db["__global__"].get("intro_path")
     try:
+        import shutil
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         base_fn = f"{ARCHIVE_DIR}/global_test_alert_{ts}.mp3"
-        await asyncio.to_thread(generate_eas_message, msg, base_fn, pre, voice=voice, intro_path=ipath)
+        await asyncio.to_thread(generate_eas_message, msg, base_fn, pre, voice=voice)
         await archive_to_central_repo(f"Global Test Alert", msg, base_fn)
         for gid, cfg in servers_db.items():
             if gid.startswith("__"): continue
@@ -136,7 +134,7 @@ async def trigger_global_test(trigger_source="Web UI"):
                 if vcid:
                     chan = guild.get_channel(vcid)
                     if chan:
-                        try: vc = await chan.connect(self_deaf=True)
+                        try: vc = await channel.connect(self_deaf=True)
                         except: continue
             if not vc or not vc.is_connected() or vc.is_playing(): continue
             gfn = f"{ARCHIVE_DIR}/global_test_{gid}_{ts}.mp3"
@@ -245,9 +243,9 @@ async def archive(ctx, channel_id: str = None):
 async def help(ctx):
     embed = discord.Embed(title="📡 AliEAS v1.0", color=discord.Color.blue())
     embed.add_field(name="🎙️ General", value="`fco!join`, `fco!leave`, `fco!active`, `fco!history`, `fco!weather`, `fco!stop`, `fco!status`, `fco!voices`, `fco!voice`", inline=False)
-    embed.add_field(name="⚙️ Admin", value="`fco!setup <ZIP>`, `fco!test`, `fco!setvoice <Name>`, `fco!outrosound`", inline=False)
+    embed.add_field(name="⚙️ Admin", value="`fco!setup <ZIP>`, `fco!test`, `fco!setvoice <Name>`, `fco!introsound`, `fco!outrosound` ", inline=False)
     if await bot.is_owner(ctx.author):
-        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!introsound`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice` ", inline=False)
+        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice` ", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -263,7 +261,7 @@ async def setup(ctx, zip_code: str = None):
         zone = pres['properties']['county'].split('/')[-1]
     except: return await ctx.send("❌ Setup failed.")
     if not ctx.author.voice: return await ctx.send("❌ Join a VC first.")
-    servers_db[str(ctx.guild.id)] = {"zone": zone, "place_name": pn, "text_channel_id": ctx.channel.id, "voice_channel_id": ctx.author.voice.channel.id, "guild_name": ctx.guild.name, "zip_code": zip_code, "voice": DEFAULT_VOICE, "outro_path": None}
+    servers_db[str(ctx.guild.id)] = {"zone": zone, "place_name": pn, "text_channel_id": ctx.channel.id, "voice_channel_id": ctx.author.voice.channel.id, "guild_name": ctx.guild.name, "zip_code": zip_code, "voice": DEFAULT_VOICE, "intro_path": None, "outro_path": None}
     save_db(servers_db)
     if not ctx.voice_client: await ctx.author.voice.channel.connect(self_deaf=True)
     await ctx.send(f"✅ Setup Complete!")
@@ -320,7 +318,8 @@ async def test(ctx):
     if not vc or vc.is_playing(): return
     await ctx.send("Generating test...")
     msg = f"This is a test of the Emergency Alert System for zone {cfg['zone']}."
-    ip, op = servers_db["__global__"].get("intro_path"), cfg.get("outro_path")
+    # For tests, we follow the forecast rules: include intro/outro if set
+    ip, op = cfg.get("intro_path"), cfg.get("outro_path")
     try:
         ts = datetime.now().strftime("%Y%M%S")
         fn = f"{ARCHIVE_DIR}/test_{gid}_{ts}.mp3"
@@ -343,7 +342,7 @@ async def pipe(ctx):
         from EASGen import EASGen
         from eas_audio import apply_radio_filter, _generate_sapi5
         user_audio = await asyncio.to_thread(AudioSegment.from_file, tmp)
-        gv, ip = servers_db["__global__"].get("voice", DEFAULT_VOICE), servers_db["__global__"].get("intro_path")
+        gv = servers_db.get("__global__", {}).get("voice", DEFAULT_VOICE)
         if os.path.exists(tmp): os.remove(tmp)
         intro_fn = f"temp_intro_{ts}.wav"
         await asyncio.to_thread(_generate_sapi5, "This voice channel has been interrupted for the Emergency Alert System.", intro_fn, gv)
@@ -352,9 +351,7 @@ async def pipe(ctx):
         h, a, e = EASGen.genHeader("ZCZC-WXR-EAN-008043+0015-1231234-KDEN/NWS-"), EASGen.genATTN(8), EASGen.genEOM()
         def compile():
             silence = AudioSegment.silent(duration=1000)
-            res = intro_spoken + silence + h + AudioSegment.silent(500) + a + silence + apply_radio_filter(user_audio) + silence + e
-            if ip and os.path.exists(ip): res = AudioSegment.from_file(ip) + silence + res
-            return res
+            return intro_spoken + silence + h + AudioSegment.silent(500) + a + silence + apply_radio_filter(user_audio) + silence + e
         final = await asyncio.to_thread(compile)
         base_fn = f"{ARCHIVE_DIR}/pipe_base_{ts}.mp3"
         await asyncio.to_thread(final.export, base_fn, format="mp3")
@@ -378,7 +375,8 @@ async def weather(ctx, target_zip: str = None):
     cfg = servers_db.get(gid, {})
     zu = target_zip or cfg.get("zip_code")
     if not zu: return
-    v, ip, op = cfg.get("voice", DEFAULT_VOICE), servers_db["__global__"].get("intro_path"), cfg.get("outro_path")
+    # Use server-specific intro and outro
+    v, ip, op = cfg.get("voice", DEFAULT_VOICE), cfg.get("intro_path"), cfg.get("outro_path")
     await ctx.send(f"🔍 Fetching forecast for {zu}...")
     try:
         zres = requests.get(f"http://api.zippopotam.us/us/{zu}").json()
@@ -491,8 +489,8 @@ async def check_nws_alerts():
                                 a = new_alerts[0]
                                 speech = f"Alert: {a.get('headline')}. {a.get('description')}"
                                 fn = f"{ARCHIVE_DIR}/alert_{aid.split('.')[-1]}_{gid}_{datetime.now().strftime('%H%M%S')}.mp3"
-                                ip, op = servers_db["__global__"].get("intro_path"), cfg.get("outro_path")
-                                await asyncio.to_thread(generate_eas_message, speech, fn, "This voice channel has been interrupted for the Emergency Alert System.", voice=cfg.get("voice", DEFAULT_VOICE), intro_path=ip, outro_path=op)
+                                # Real Alerts: No custom intro/outro as per user request
+                                await asyncio.to_thread(generate_eas_message, speech, fn, "This voice channel has been interrupted in order to partissipate in the emergency alert system.", voice=cfg.get("voice", DEFAULT_VOICE))
                                 await archive_to_central_repo(f"REAL ALERT ({cfg.get('place_name', z)})", speech, fn)
                                 vc.play(discord.FFmpegPCMAudio(source=fn))
             except: pass
