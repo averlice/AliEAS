@@ -57,7 +57,9 @@ async def archive_to_central_repo(title, description, file_path):
     if not channel_id: return
     try:
         channel = await bot.fetch_channel(int(channel_id))
-        embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=description, color=discord.Color.dark_grey(), timestamp=datetime.now())
+        # Ensure description fits in embed (4096 char limit)
+        clean_desc = description[:4000] + ("..." if len(description) > 4000 else "")
+        embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=clean_desc, color=discord.Color.dark_grey(), timestamp=datetime.now())
         await channel.send(embed=embed, file=discord.File(file_path))
         print(f"Successfully archived {title} to Discord.")
     except Exception as e: print(f"Central Repo Error: {e}")
@@ -442,15 +444,23 @@ async def weather(ctx, target_zip: str = None):
 
         spoken_text += " For the latest information, go to weather.gov."
 
-        async def play_weather_audio():
-            if ctx.voice_client and not ctx.voice_client.is_playing():
+        async def generate_and_play_weather():
+            try:
+                # 1. Generate audio for EVERY request (so it can be archived)
                 fn = os.path.abspath(f"{ARCHIVE_DIR}/weather_{gid}_{datetime.now().strftime('%H%M%S')}.wav")
                 await asyncio.to_thread(generate_normal_speech, spoken_text, fn, voice=v, intro_path=ip, outro_path=op)
+                
+                # 2. Archive to central repo (Always do this)
                 await archive_to_central_repo(f"Weather Forecast ({pn})", spoken_text, fn)
-                ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
+                
+                # 3. Play if in VC
+                if ctx.voice_client and not ctx.voice_client.is_playing():
+                    ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
+            except Exception as e:
+                print(f"Weather audio error: {e}")
 
-        # Start audio playback in the background immediately
-        bot.loop.create_task(play_weather_audio())
+        # Start the background task for generation, archiving, and playback
+        bot.loop.create_task(generate_and_play_weather())
 
         for i, block in enumerate(forecast_text_blocks):
             embed = discord.Embed(title=f"🌤️ {pn} ({i+1}/{len(forecast_text_blocks)})", description=block, color=discord.Color.blue())
@@ -524,7 +534,11 @@ async def check_nws_alerts():
                             # 1. Generate audio ONCE for the archive (even if not in VC)
                             speech = f"Alert: {a.get('headline')}. {a.get('description')}"
                             ts_str = datetime.now().strftime('%Y%M%S')
-                            archive_fn = os.path.abspath(f"{ARCHIVE_DIR}/alert_{a.get('id').split('/')[-1]}_{ts_str}.wav")
+                            
+                            # Sanitize Alert ID for Windows Filename (remove colons, etc)
+                            safe_id = re.sub(r'[^a-zA-Z0-9]', '_', a.get('id', 'unknown').split('/')[-1])
+                            archive_fn = os.path.abspath(f"{ARCHIVE_DIR}/alert_{safe_id}_{ts_str}.wav")
+                            
                             await asyncio.to_thread(generate_eas_message, speech, archive_fn, "This voice channel has been interrupted for the Emergency Alert System.", voice=DEFAULT_VOICE)
                             
                             # 2. Archive to central repository immediately
