@@ -86,7 +86,7 @@ async def discord_callback(request):
     code = request.query.get("code")
     client_id, client_secret, redirect_uri = os.getenv("DISCORD_CLIENT_ID"), os.getenv("DISCORD_CLIENT_SECRET"), os.getenv("REDIRECT_URI")
     async with aiohttp.ClientSession() as session:
-        async with session.post("https://discord.com/api/oauth2/token", data={"client_id": client_id, "client_secret": client_secret, "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}) as resp:
+        async with session.post("https://discord.com/api/oauth2/token", data={"client_id": client_id, "client_secret": client_secret, "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}) as resp: 
             token_data = await resp.json()
             access_token = token_data.get("access_token")
         async with session.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {access_token}"}) as resp:
@@ -144,10 +144,10 @@ async def trigger_global_test(trigger_source="Web UI"):
                 if e: print(f"❌ Player Error in {guild_name}: {e}")
                 else: print(f"✅ Audio finished playing in {guild_name}")
 
-            vc.play(discord.FFmpegPCMAudio(source=gfn), after=lambda e: play_error_handler(e, guild.name))
+            vc.play(discord.FFmpegPCMAudio(source=gfn), after=lambda e: play_error_handler(e, guild.name))      
     except Exception as e: print(f"Global test error: {e}")
 
-async def web_trigger_test(request): bot.loop.create_task(trigger_global_test()); return web.HTTPFound('/')
+async def web_trigger_test(request): bot.loop.create_task(trigger_global_test()); return web.HTTPFound('/')     
 async def web_stop_audio(request):
     for vc in bot.voice_clients:
         if vc.is_playing(): vc.stop()
@@ -209,7 +209,7 @@ async def introsound(ctx):
         return
     att = ctx.message.attachments[0]
     ext = os.path.splitext(att.filename)[1].lower()
-    if ext not in ['.wav', '.wav', '.m4a', '.ogg']: return await ctx.send("❌ Unsupported format.")
+    if ext not in ['.wav', '.mp3', '.m4a', '.ogg']: return await ctx.send("❌ Unsupported format.")
     path = os.path.abspath(os.path.join("sounds", f"intro_{gid}{ext}"))
     await att.save(path)
     servers_db[gid]["intro_path"] = path
@@ -229,7 +229,7 @@ async def outrosound(ctx):
         return
     att = ctx.message.attachments[0]
     ext = os.path.splitext(att.filename)[1].lower()
-    if ext not in ['.wav', '.wav', '.m4a', '.ogg']: return await ctx.send("❌ Unsupported format.")
+    if ext not in ['.wav', '.mp3', '.m4a', '.ogg']: return await ctx.send("❌ Unsupported format.")
     path = os.path.abspath(os.path.join("sounds", f"outro_{gid}{ext}"))
     await att.save(path)
     servers_db[gid]["outro_path"] = path
@@ -363,7 +363,7 @@ async def pipe(ctx):
             return intro_spoken + silence + h + AudioSegment.silent(500) + a + silence + user_audio + silence + e
         final = await asyncio.to_thread(compile)
         base_fn = os.path.abspath(f"{ARCHIVE_DIR}/pipe_base_{ts}.wav")
-        await asyncio.to_thread(final.export, base_fn, format="mp3")
+        await asyncio.to_thread(final.export, base_fn, format="wav")
         await archive_to_central_repo(f"Manual Pipe Broadcast", "Manual audio broadcast.", base_fn)
         for gid, cfg in servers_db.items():
             if gid.startswith("__"): continue
@@ -396,25 +396,29 @@ async def weather(ctx, target_zip: str = None):
             async with session.get(furl, headers={"User-Agent": "EASBot"}) as r:
                 fdata = await r.json()
             periods = fdata['properties']['periods']
-            txt, spoken = "", f"Detailed forecast for {pn}. "
+            txt, spoken_text = "", f"Detailed forecast for {pn}. "
+            forecast_text_blocks = []
             for p in periods:
                 line = f"**{p['name']}**: {p['detailedForecast']}\n"
-                if len(txt) + len(line) < 1900: txt += line
-                spoken += f"{p['name']}. {p['detailedForecast']} "
-            spoken += " For the latest information, go to weather.gov."
+                if not forecast_text_blocks or len(forecast_text_blocks[-1]) + len(line) > 1900:
+                    forecast_text_blocks.append(line)
+                else:
+                    forecast_text_blocks[-1] += line
+                spoken_text += f"{p['name']}. {p['detailedForecast']} "
+            
             hwo_url = f"https://api.weather.gov/products/types/HWO/locations/{cwa}"
             def parse_hwo_text(t):
-                m = re.search(r'(This hazardous weather outlook|\.DAY ONE.*?|DISCUSSION\.\.\.)', t, re.I)
+                m = re.search(r'(This hazardous weather outlook|\.DAY ONE.*?|DISCUSSION\.\.\.)', t, re.I)       
                 if m: return re.sub(r'\s+', ' ', re.split(r'\.SPOTTER|\$\$|\&\&', t[m.start():], flags=re.I)[0].strip().replace('\n', ' ').replace('*', ''))
                 return None
             hwo_found, hwo_summary = False, ""
             async with session.get(hwo_url, headers={"User-Agent": "EASBot"}) as r:
                 hlist = await r.json()
             if hlist.get('@graph'):
-                async with session.get(hlist['@graph'][0]['@id'], headers={"User-Agent": "EASBot"}) as r:
+                async with session.get(hlist['@graph'][0]['@id'], headers={"User-Agent": "EASBot"}) as r:       
                     hraw = await r.json()
                 parsed = parse_hwo_text(hraw.get('productText', ''))
-                if parsed: hwo_summary = parsed; spoken += " Hazardous Weather Outlook. " + parsed; hwo_found = True
+                if parsed: hwo_summary = parsed; spoken_text += " Hazardous Weather Outlook. " + parsed; hwo_found = True
             if not hwo_found:
                 try:
                     from bs4 import BeautifulSoup
@@ -423,43 +427,63 @@ async def weather(ctx, target_zip: str = None):
                             soup = BeautifulSoup(await r.text(), 'html.parser')
                             for table in soup.find_all('table'):
                                 parsed = parse_hwo_text(table.get_text())
-                                if parsed: hwo_summary = parsed; spoken += " Hazardous Weather Outlook. " + parsed; hwo_found = True; break
+                                if parsed: hwo_summary = parsed; spoken_text += " Hazardous Weather Outlook. " + parsed; hwo_found = True; break
                 except: pass
             if not hwo_found:
                 async with session.get(f"https://api.weather.gov/products/types/AFD/locations/{cwa}", headers={"User-Agent": "EASBot"}) as r:
                     alist = await r.json()
                 if alist.get('@graph'):
-                    async with session.get(alist['@graph'][0]['@id'], headers={"User-Agent": "EASBot"}) as r:
+                    async with session.get(alist['@graph'][0]['@id'], headers={"User-Agent": "EASBot"}) as r:   
                         araw = await r.json()
                     m = re.search(r'\.(?:KEY MESSAGES|SYNOPSIS)\.\.\.(.*?)\&\&', araw.get('productText', ''), re.S | re.I)
                     if m:
                         hwo_summary = re.sub(r'\s+', ' ', m.group(1).replace('\n', ' ').replace('*', '').replace('-', ''))
-                        spoken += " Regional Weather Summary. " + hwo_summary; hwo_found = True
-        await ctx.send(embed=discord.Embed(title=f"🌤️ {pn}", description=txt[:2000], color=discord.Color.blue()))
-        if ctx.voice_client and not ctx.voice_client.is_playing():
-            fn = os.path.abspath(f"{ARCHIVE_DIR}/weather_{gid}_{datetime.now().strftime('%Y%M%S')}.wav")
-            await asyncio.to_thread(generate_normal_speech, spoken, fn, voice=v, intro_path=ip, outro_path=op)
-            await archive_to_central_repo(f"Weather Forecast ({pn})", spoken, fn)
-            ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
+                        spoken_text += " Regional Weather Summary. " + hwo_summary; hwo_found = True
+
+        spoken_text += " For the latest information, go to weather.gov."
+
+        async def play_weather_audio():
+            if ctx.voice_client and not ctx.voice_client.is_playing():
+                fn = os.path.abspath(f"{ARCHIVE_DIR}/weather_{gid}_{datetime.now().strftime('%H%M%S')}.wav")
+                await asyncio.to_thread(generate_normal_speech, spoken_text, fn, voice=v, intro_path=ip, outro_path=op)
+                await archive_to_central_repo(f"Weather Forecast ({pn})", spoken_text, fn)
+                ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
+
+        # Start audio playback in the background immediately
+        bot.loop.create_task(play_weather_audio())
+
+        for i, block in enumerate(forecast_text_blocks):
+            embed = discord.Embed(title=f"🌤️ {pn} ({i+1}/{len(forecast_text_blocks)})", description=block, color=discord.Color.blue())
+            if i == len(forecast_text_blocks) - 1: embed.add_field(name="⚠️ Outlook", value=hwo_summary[:1024], inline=False)
+            await ctx.send(embed=embed)
+            if i < len(forecast_text_blocks) - 1: await asyncio.sleep(10)
     except Exception as e: print(e); await ctx.send("Error.")
 
 @bot.command(aliases=['testg'])
 @commands.is_owner()
 async def testglobal(ctx): await trigger_global_test("Bot Owner")
+
 @bot.command()
 @commands.is_owner()
 async def serverslist(ctx):
     msg = "**Servers:**\n" + "\n".join([f"- {c.get('guild_name')}: {c.get('zone')}" for k,c in servers_db.items() if not k.startswith("__")])
     await ctx.send(msg[:2000])
+
 @bot.command()
 @commands.is_owner()
-async def freshpull(ctx): await check_nws_alerts(); await ctx.send("Done.")
+async def freshpull(ctx): 
+    await ctx.send("🔄 Manual Pull Requested...")
+    await check_nws_alerts()
+    await ctx.send("✅ Done.")
+
 @bot.command()
 @commands.is_owner()
 async def restart(ctx): await bot.close(); os._exit(0)
+
 @bot.command()
 @commands.is_owner()
 async def shutdown(ctx): await bot.close()
+
 @bot.command()
 @commands.is_owner()
 async def getlogs(ctx):
@@ -468,6 +492,7 @@ async def getlogs(ctx):
     else: await ctx.send("No logs.")
 
 last_weekly_test_date = None
+
 @tasks.loop(minutes=2.0)
 async def check_nws_alerts():
     global last_weekly_test_date
@@ -476,8 +501,10 @@ async def check_nws_alerts():
         if last_weekly_test_date != now.strftime("%Y-%m-%d"):
             last_weekly_test_date = now.strftime("%Y-%m-%d")
             await trigger_global_test("Automated System")
+            
     uz = set(c["zone"] for k,c in servers_db.items() if not k.startswith("__"))
     if not uz: return
+    
     async with aiohttp.ClientSession() as session:
         for z in uz:
             try:
@@ -491,26 +518,42 @@ async def check_nws_alerts():
                             if aid and aid not in seen_alerts:
                                 seen_alerts.add(aid)
                                 new_alerts.append(p)
-                        for gid, cfg in servers_db.items():
-                            if gid.startswith("__") or cfg.get("zone") != z: continue
-                            guild = bot.get_guild(int(gid))
-                            if not guild: continue
-                            tchan = guild.get_channel(cfg.get("text_channel_id"))
-                            if tchan:
-                                for a in new_alerts:
+                        
+                        # Process each new alert
+                        for a in new_alerts:
+                            # 1. Generate audio ONCE for the archive (even if not in VC)
+                            speech = f"Alert: {a.get('headline')}. {a.get('description')}"
+                            ts_str = datetime.now().strftime('%Y%M%S')
+                            archive_fn = os.path.abspath(f"{ARCHIVE_DIR}/alert_{a.get('id').split('/')[-1]}_{ts_str}.wav")
+                            await asyncio.to_thread(generate_eas_message, speech, archive_fn, "This voice channel has been interrupted for the Emergency Alert System.", voice=DEFAULT_VOICE)
+                            
+                            # 2. Archive to central repository immediately
+                            await archive_to_central_repo(f"REAL ALERT: {a.get('event')}", speech, archive_fn)
+                            
+                            # 3. Dispatch to all servers tracking this zone
+                            for gid, cfg in servers_db.items():
+                                if gid.startswith("__") or cfg.get("zone") != z: continue
+                                guild = bot.get_guild(int(gid))
+                                if not guild: continue
+                                
+                                # Send Text Embed
+                                tchan = guild.get_channel(cfg.get("text_channel_id"))
+                                if tchan:
                                     color = discord.Color.red() if a.get('severity') in ["Extreme", "Severe"] else discord.Color.gold()
                                     embed = discord.Embed(title=f"🚨 {a.get('event')}", description=a.get('headline'), color=color)
                                     bot.loop.create_task(tchan.send(embed=embed))
-                            vc = guild.voice_client
-                            if vc and vc.is_connected() and not vc.is_playing() and new_alerts:
-                                a = new_alerts[0]
-                                speech = f"Alert: {a.get('headline')}. {a.get('description')}"
-                                fn = os.path.abspath(f"{ARCHIVE_DIR}/alert_{aid.split('.')[-1]}_{gid}_{datetime.now().strftime('%H%M%S')}.wav")
-                                # Real Alerts: No custom intro/outro per user request
-                                await asyncio.to_thread(generate_eas_message, speech, fn, "This voice channel has been interrupted in order to partissipate in the emergency alert system.", voice=cfg.get("voice", DEFAULT_VOICE))
-                                await archive_to_central_repo(f"REAL ALERT ({cfg.get('place_name', z)})", speech, fn)
-                                vc.play(discord.FFmpegPCMAudio(source=fn))
-            except: pass
+                                    
+                                # Play in Voice
+                                vc = guild.voice_client
+                                if vc and vc.is_connected() and not vc.is_playing():
+                                    # Copy the archive file to a server-specific file for playback to avoid contention
+                                    play_fn = os.path.abspath(f"{ARCHIVE_DIR}/play_{gid}_{ts_str}.wav")
+                                    shutil.copy(archive_fn, play_fn)
+                                    vc.play(discord.FFmpegPCMAudio(source=play_fn))
+            except Exception as e:
+                print(f"API Error {z}: {e}")
+                
+    # Watchdog for dead connections
     for gid, cfg in servers_db.items():
         if gid.startswith("__"): continue
         guild = bot.get_guild(int(gid))
