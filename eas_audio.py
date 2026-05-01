@@ -124,23 +124,23 @@ def generate_eas_message(text, output_filename="alert.wav", pre_speech=None, voi
     import uuid
     print(f"Generating audio for text: {text} using voice: {voice}")
     
-    # Force 44.1kHz throughout
     TARGET_SR = 44100
+    def ensure_sr(seg): return seg.set_frame_rate(TARGET_SR) if seg.frame_rate != TARGET_SR else seg
+
+    # 1. SAME Header
+    header = ensure_sr(EASGen.genHeader("ZCZC-WXR-EAN-008043+0015-1231234-KDEN/NWS-"))
     
-    # 1. SAME Header (Upsampled)
-    header = EASGen.genHeader("ZCZC-WXR-EAN-008043+0015-1231234-KDEN/NWS-").set_frame_rate(TARGET_SR)
+    # 2. Attention signal
+    attention = ensure_sr(EASGen.genATTN(8))
     
-    # 2. Attention signal (Upsampled)
-    attention = EASGen.genATTN(8).set_frame_rate(TARGET_SR)
-    
-    # 3. Voice message (Upsampled)
+    # 3. Voice message
     unique_id = uuid.uuid4().hex[:8]
     temp_tts_file = os.path.abspath(f"temp_tts_{unique_id}.wav")
     generate_voice_with_fallback(text, temp_tts_file, voice)
-    voice_audio = AudioSegment.from_wav(temp_tts_file).set_frame_rate(TARGET_SR)
+    voice_audio = ensure_sr(AudioSegment.from_wav(temp_tts_file))
     
-    # 4. EOM (Upsampled)
-    eom = EASGen.genEOM().set_frame_rate(TARGET_SR)
+    # 4. EOM
+    eom = ensure_sr(EASGen.genEOM())
     
     # 5. Compile
     silence_short = AudioSegment.silent(duration=500, frame_rate=TARGET_SR)
@@ -152,21 +152,20 @@ def generate_eas_message(text, output_filename="alert.wav", pre_speech=None, voi
     if pre_speech:
         temp_pre_file = os.path.abspath(f"temp_pre_{unique_id}.wav")
         generate_voice_with_fallback(pre_speech, temp_pre_file, voice)
-        pre_voice = AudioSegment.from_wav(temp_pre_file).set_frame_rate(TARGET_SR)
+        pre_voice = ensure_sr(AudioSegment.from_wav(temp_pre_file))
         final_audio = pre_voice + silence_long + final_audio
         if os.path.exists(temp_pre_file): os.remove(temp_pre_file)
         
-    # 7. Intro Sound (External file - Upsampled)
+    # 7. Intro Sound (External file)
     if intro_path and os.path.exists(intro_path):
-        intro_sound = AudioSegment.from_file(intro_path).set_frame_rate(TARGET_SR)
+        intro_sound = ensure_sr(AudioSegment.from_file(intro_path))
         final_audio = intro_sound + silence_long + final_audio
         
-    # 8. Outro Sound (External file - Upsampled)
+    # 8. Outro Sound (External file)
     if outro_path and os.path.exists(outro_path):
-        outro_sound = AudioSegment.from_file(outro_path).set_frame_rate(TARGET_SR)
+        outro_sound = ensure_sr(AudioSegment.from_file(outro_path))
         final_audio = final_audio + silence_long + outro_sound
     
-    # Export as WAV
     final_audio.export(output_filename, format="wav")
     if os.path.exists(temp_tts_file): os.remove(temp_tts_file)
     return output_filename
@@ -176,20 +175,23 @@ def generate_normal_speech(text, output_filename="speech.wav", voice="ScanSoft T
     print(f"Generating normal speech for text: {text} using voice: {voice}")
     
     TARGET_SR = 44100
+    def ensure_sr(seg): return seg.set_frame_rate(TARGET_SR) if seg.frame_rate != TARGET_SR else seg
+
     unique_id = uuid.uuid4().hex[:8]
     temp_tts_file = os.path.abspath(f"temp_tts_normal_{unique_id}.wav")
     generate_voice_with_fallback(text, temp_tts_file, voice)
-    voice_audio = AudioSegment.from_wav(temp_tts_file).set_frame_rate(TARGET_SR)
+    voice_audio = ensure_sr(AudioSegment.from_wav(temp_tts_file))
     
-    silence = AudioSegment.silent(duration=1000, frame_rate=TARGET_SR)
-    final_audio = AudioSegment.silent(duration=500, frame_rate=TARGET_SR) + voice_audio + AudioSegment.silent(duration=500, frame_rate=TARGET_SR)
+    silence_500 = AudioSegment.silent(duration=500, frame_rate=TARGET_SR)
+    silence_1000 = AudioSegment.silent(duration=1000, frame_rate=TARGET_SR)
+    final_audio = silence_500 + voice_audio + silence_500
     
     if intro_path and os.path.exists(intro_path):
-        intro_sound = AudioSegment.from_file(intro_path).set_frame_rate(TARGET_SR)
-        final_audio = intro_sound + silence + final_audio
+        intro_sound = ensure_sr(AudioSegment.from_file(intro_path))
+        final_audio = intro_sound + silence_1000 + final_audio
     if outro_path and os.path.exists(outro_path):
-        outro_sound = AudioSegment.from_file(outro_path).set_frame_rate(TARGET_SR)
-        final_audio = final_audio + silence + outro_sound
+        outro_sound = ensure_sr(AudioSegment.from_file(outro_path))
+        final_audio = final_audio + silence_1000 + outro_sound
         
     final_audio.export(output_filename, format="wav")
     if os.path.exists(temp_tts_file): os.remove(temp_tts_file)
