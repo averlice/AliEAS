@@ -63,6 +63,16 @@ def save_db(data):
 
 servers_db = load_db()
 
+# --- Cleanup Helper ---
+def safe_delete(file_path):
+    """Safely deletes a file if it exists."""
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"🗑️ Deleted temporary file: {os.path.basename(file_path)}")
+    except Exception as e:
+        logger.error(f"Error deleting file {file_path}: {e}")
+
 # --- Central Repository Helper ---
 async def archive_to_central_repo(title, description, file_path):
     """Uploads an alert and its audio to the central Discord repository with multi-stage quality fallbacks."""
@@ -167,16 +177,11 @@ async def require_auth(request):
 
 async def web_index(request):
     await require_auth(request)
-    archive_items = [f for f in sorted(os.listdir(ARCHIVE_DIR), reverse=True) if f.endswith(".wav")] if os.path.exists(ARCHIVE_DIR) else []
-    archive_html = "".join([f'<li><strong>{i.replace("_", " ")}</strong><br><audio controls src="/archive/{i}"></audio></li><hr>' for i in archive_items]) or "<li>No alerts.</li>"
-    html = f"<html><body style='font-family:monospace;background:#121212;color:#00ff00;padding:20px'><h1>EAS ENDEC v{BOT_VERSION}</h1><p>Servers: {len(servers_db)-1}</p><form action='/test' method='post'><button type='submit'>Global Test</button></form><form action='/stop' method='post'><button type='submit'>Stop All</button></form><h2>Archive</h2><ul>{archive_html}</ul></body></html>"
+    html = f"<html><body style='font-family:monospace;background:#121212;color:#00ff00;padding:20px'><h1>EAS ENDEC v{BOT_VERSION}</h1><p>Servers: {len(servers_db)-1}</p><form action='/test' method='post'><button type='submit'>Global Test</button></form><form action='/stop' method='post'><button type='submit'>Stop All</button></form><h2>Cloud Archive Only</h2><p>Local files are automatically deleted to save space. Check the designated Discord channel for alert logs.</p></body></html>"
     return web.Response(text=html, content_type='text/html')
 
 async def web_serve_archive(request):
-    fn = request.match_info.get('filename')
-    path = os.path.join(ARCHIVE_DIR, fn)
-    if os.path.exists(path) and fn.endswith(".wav"): return web.FileResponse(path)
-    return web.Response(status=404)
+    return web.Response(status=404, text="Local archiving is disabled. Use Discord channel.")
 
 async def trigger_global_test(trigger_source="Web UI"):
     logger.info(f"Global test triggered by: {trigger_source}")
@@ -206,7 +211,10 @@ async def trigger_global_test(trigger_source="Web UI"):
             if not vc or not vc.is_connected() or vc.is_playing(): continue
             gfn = os.path.abspath(f"{ARCHIVE_DIR}/global_test_{gid}_{ts}.wav")
             shutil.copy(base_fn, gfn)
-            vc.play(discord.FFmpegPCMAudio(source=gfn))      
+            vc.play(discord.FFmpegPCMAudio(source=gfn), after=lambda e: safe_delete(gfn))      
+        
+        # Base file cleanup after archive and all copies are made
+        safe_delete(base_fn)
     except Exception as e:
         logger.error(f"Global test error: {e}")
 
@@ -237,6 +245,13 @@ async def on_ready():
     logger.info(f'Logged in as {bot.user.name}')
     if not os.path.exists(ARCHIVE_DIR): os.makedirs(ARCHIVE_DIR)
     if not os.path.exists("sounds"): os.makedirs("sounds")
+    
+    # Startup Cleanup: Clear out old WAV files to save space
+    logger.info("🧹 Performing startup cleanup of archive folder...")
+    for f in os.listdir(ARCHIVE_DIR):
+        if f.endswith(".wav") or f.endswith(".mp3") or f.endswith(".flac"):
+            safe_delete(os.path.join(ARCHIVE_DIR, f))
+
     bot.loop.create_task(start_web_server())
     for gid, cfg in servers_db.items():
         if gid.startswith("__"): continue
@@ -313,7 +328,7 @@ async def help(ctx):
     embed.add_field(name="🎙️ General", value="`fco!join`, `fco!leave`, `fco!active`, `fco!history`, `fco!weather`, `fco!stop`, `fco!status`, `fco!voices`, `fco!voice`", inline=False)
     embed.add_field(name="⚙️ Admin", value="`fco!setup <ZIP>`, `fco!test`, `fco!setvoice <Name>`, `fco!introsound`, `fco!outrosound` ", inline=False)
     if await bot.is_owner(ctx.author):
-        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice` ", inline=False)
+        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!introsound`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice` ", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -396,7 +411,7 @@ async def test(ctx):
         logger.info(f"Generating test for {ctx.guild.name} using voice: {v}")
         await asyncio.to_thread(generate_eas_message, msg, fn, "This voice channel has been interrupted for the Emergency Alert System.", voice=v)
         await archive_to_central_repo(f"Test Alert ({ctx.guild.name})", msg, fn)
-        vc.play(discord.FFmpegPCMAudio(source=fn))
+        vc.play(discord.FFmpegPCMAudio(source=fn), after=lambda e: safe_delete(fn))
         await ctx.send(f"Now playing the test message using `{v}`.")
     except Exception as e:
         logger.error(f"Test command error: {e}")
@@ -443,7 +458,6 @@ async def pipe(ctx):
         base_fn = os.path.abspath(f"{ARCHIVE_DIR}/pipe_base_{ts}.wav")
         await asyncio.to_thread(final.export, base_fn, format="wav")
         
-        # ARCIVE CALL
         await archive_to_central_repo(f"Manual Pipe Broadcast", "Manual audio broadcast.", base_fn)
         
         for gid, cfg in servers_db.items():
@@ -453,9 +467,11 @@ async def pipe(ctx):
             
             gfn = os.path.abspath(f"{ARCHIVE_DIR}/pipe_{gid}_{ts}.wav")
             shutil.copy(base_fn, gfn)
-            guild.voice_client.play(discord.FFmpegPCMAudio(source=gfn))
+            guild.voice_client.play(discord.FFmpegPCMAudio(source=gfn), after=lambda e: safe_delete(gfn))
             logger.info(f"📢 Piped audio to {guild.name}")
-            
+        
+        # Base file cleanup after archive and all copies are made
+        safe_delete(base_fn)
         await ctx.send("Global pipe complete.")
     except Exception as e:
         logger.error(f"Pipe command failure: {e}")
@@ -539,7 +555,10 @@ async def weather(ctx, target_zip: str = None):
                 
                 # 3. Play if in VC
                 if ctx.voice_client and not ctx.voice_client.is_playing():
-                    ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn))
+                    ctx.voice_client.play(discord.FFmpegPCMAudio(source=fn), after=lambda e: safe_delete(fn))
+                else:
+                    # If not playing, delete local file now (already archived)
+                    safe_delete(fn)
             except Exception as e:
                 logger.error(f"Weather audio error: {e}")
 
@@ -638,6 +657,8 @@ async def check_nws_alerts():
                                 archive_fn = os.path.abspath(f"{ARCHIVE_DIR}/alert_{safe_id}_{ts_str}.wav")
                                 await asyncio.to_thread(generate_eas_message, speech, archive_fn, "This voice channel has been interrupted for the Emergency Alert System.", voice=DEFAULT_VOICE)
                                 await archive_to_central_repo(f"REAL ALERT: {a.get('event')} (Log Only)", speech, archive_fn)
+                                # Local Cleanup
+                                safe_delete(archive_fn)
                                 continue
                                 
                             # Generate one file per required voice
@@ -665,7 +686,11 @@ async def check_nws_alerts():
                                 if vc and vc.is_connected() and not vc.is_playing():
                                     play_fn = os.path.abspath(f"{ARCHIVE_DIR}/play_{guild.id}_{ts_str}.wav")
                                     shutil.copy(voice_files[v_choice], play_fn)
-                                    vc.play(discord.FFmpegPCMAudio(source=play_fn))
+                                    vc.play(discord.FFmpegPCMAudio(source=play_fn), after=lambda e: safe_delete(play_fn))
+                            
+                            # Cleanup base voice files after all dispatches
+                            for vf in voice_files.values():
+                                safe_delete(vf)
             except Exception as e:
                 logger.error(f"API/Alert loop error for zone {z}: {e}")
                 
