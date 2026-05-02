@@ -66,13 +66,33 @@ servers_db = load_db()
 async def archive_to_central_repo(title, description, file_path):
     """Uploads an alert and its audio to the central Discord repository."""
     channel_id = servers_db.get("__global__", {}).get("archive_channel_id")
-    if not channel_id: return
+    if not channel_id: 
+        logger.warning(f"⚠️ Archive channel not set. Skipping archive for: {title}")
+        return
     try:
         channel = await bot.fetch_channel(int(channel_id))
+        
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        upload_path = file_path
+        
+        # If file is > 24MB, convert to MP3 for archive to ensure success
+        if file_size_mb > 24.0:
+            logger.info(f"📁 File too large for Discord ({file_size_mb:.1f}MB). Converting to MP3 for archive...")
+            from pydub import AudioSegment
+            mp3_path = file_path.replace(".wav", ".mp3")
+            audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
+            await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate="320k")
+            upload_path = mp3_path
+            logger.info(f"✅ Converted to MP3 ({os.path.getsize(upload_path)/(1024*1024):.1f}MB)")
+
         clean_desc = description[:4000] + ("..." if len(description) > 4000 else "")
         embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=clean_desc, color=discord.Color.dark_grey(), timestamp=datetime.now())
-        await channel.send(embed=embed, file=discord.File(file_path))
+        await channel.send(embed=embed, file=discord.File(upload_path))
         logger.info(f"Successfully archived {title} to Discord.")
+        
+        if upload_path != file_path and os.path.exists(upload_path):
+            os.remove(upload_path)
+            
     except Exception as e: 
         logger.error(f"Central Repo Error: {e}")
 
