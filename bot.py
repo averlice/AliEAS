@@ -20,6 +20,7 @@ import sys
 import shutil
 import logging
 import socket
+from pydub import AudioSegment
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)-8s] %(name)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -65,36 +66,42 @@ servers_db = load_db()
 # --- Central Repository Helper ---
 async def archive_to_central_repo(title, description, file_path):
     """Uploads an alert and its audio to the central Discord repository."""
+    logger.info(f"📁 Archiving started: {title} (File: {os.path.basename(file_path)})")
     channel_id = servers_db.get("__global__", {}).get("archive_channel_id")
     if not channel_id: 
         logger.warning(f"⚠️ Archive channel not set. Skipping archive for: {title}")
         return
     try:
-        channel = await bot.fetch_channel(int(channel_id))
-        
+        # Use get_channel first (cache), then fetch_channel (API)
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        if not channel:
+            logger.error(f"❌ Could not find archive channel {channel_id}")
+            return
+
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
         upload_path = file_path
         
-        # If file is > 24MB, convert to MP3 for archive to ensure success
-        if file_size_mb > 24.0:
-            logger.info(f"📁 File too large for Discord ({file_size_mb:.1f}MB). Converting to MP3 for archive...")
-            from pydub import AudioSegment
+        # Lowered limit to 20MB for safety. Discord bot limit is 25MB.
+        if file_size_mb > 20.0:
+            logger.info(f"📁 File large ({file_size_mb:.1f}MB). Converting to MP3 for archive...")
             mp3_path = file_path.replace(".wav", ".mp3")
             audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
             await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate="320k")
             upload_path = mp3_path
-            logger.info(f"✅ Converted to MP3 ({os.path.getsize(upload_path)/(1024*1024):.1f}MB)")
+            logger.info(f"✅ Converted to MP3 for archive ({os.path.getsize(upload_path)/(1024*1024):.1f}MB)")
 
         clean_desc = description[:4000] + ("..." if len(description) > 4000 else "")
         embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=clean_desc, color=discord.Color.dark_grey(), timestamp=datetime.now())
+        
+        logger.info(f"📤 Sending to Discord archive channel...")
         await channel.send(embed=embed, file=discord.File(upload_path))
-        logger.info(f"Successfully archived {title} to Discord.")
+        logger.info(f"✅ Successfully archived {title} to Discord.")
         
         if upload_path != file_path and os.path.exists(upload_path):
             os.remove(upload_path)
             
     except Exception as e: 
-        logger.error(f"Central Repo Error: {e}")
+        logger.error(f"❌ Central Repo Error while archiving '{title}': {e}")
 
 # Configure bot
 intents = discord.Intents.default()
@@ -151,6 +158,7 @@ async def trigger_global_test(trigger_source="Web UI"):
     msg = "This is a test of the Emergency Alert System. This is only a test."
     voice = servers_db.get("__global__", {}).get("voice", DEFAULT_VOICE)
     try:
+        import shutil
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         base_fn = os.path.abspath(f"{ARCHIVE_DIR}/global_test_alert_{ts}.wav")
         await asyncio.to_thread(generate_eas_message, msg, base_fn, pre, voice=voice)
@@ -373,14 +381,13 @@ async def test(ctx):
 async def pipe(ctx):
     if not ctx.message.attachments: return await ctx.send("Upload file.")
     att = ctx.message.attachments[0]
-    logger.info(f"Manual pipe broadcast requested by {ctx.author}.")
+    logger.info(f"🎤 Manual pipe broadcast requested by {ctx.author}.")
     await ctx.send("Processing global pipe...")
     try:
         ts = datetime.now().strftime("%Y%M%S")
         tmp = os.path.abspath(f"temp_{ts}{os.path.splitext(att.filename)[1]}")
         await att.save(tmp)
         
-        from pydub import AudioSegment
         from EASGen import EASGen
         from eas_audio import _generate_sapi5
         
@@ -409,6 +416,8 @@ async def pipe(ctx):
         final = await asyncio.to_thread(compile)
         base_fn = os.path.abspath(f"{ARCHIVE_DIR}/pipe_base_{ts}.wav")
         await asyncio.to_thread(final.export, base_fn, format="wav")
+        
+        # ARCIVE CALL
         await archive_to_central_repo(f"Manual Pipe Broadcast", "Manual audio broadcast.", base_fn)
         
         for gid, cfg in servers_db.items():
