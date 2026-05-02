@@ -10,3 +10,4 @@ aiohttp-session
 cryptography
 numpy
 beautifulsoup4
+davey
