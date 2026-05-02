@@ -78,33 +78,47 @@ async def archive_to_central_repo(title, description, file_path):
         upload_path = file_path
         temp_files = []
         
-        # Discord Bot Limit is 25MB. 
-        if file_size_mb > 24.5:
+        # Discord Bot Limit is 25MB. We use 24MB as a hard safety ceiling.
+        MAX_MB = 24.0
+        if file_size_mb > MAX_MB:
             from pydub import AudioSegment
             audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
             
-            # Stage 1: Try Lossless FLAC (Same quality as WAV, ~50% smaller)
-            logger.info(f"📁 WAV too large ({file_size_mb:.1f}MB). Attempting lossless FLAC fallback...")
+            # Stage 1: Try Lossless FLAC (Lossless quality, ~50% size reduction)
+            logger.info(f"📁 WAV too large ({file_size_mb:.1f}MB). Attempting lossless FLAC...")
             flac_path = file_path.replace(".wav", ".flac")
             await asyncio.to_thread(audio.export, flac_path, format="flac")
             
-            if (os.path.getsize(flac_path) / (1024 * 1024)) < 24.5:
+            if (os.path.getsize(flac_path) / (1024 * 1024)) < MAX_MB:
                 upload_path = flac_path
                 temp_files.append(flac_path)
-                logger.info(f"✅ Lossless FLAC generated ({os.path.getsize(flac_path)/(1024*1024):.1f}MB)")
+                logger.info(f"✅ Lossless FLAC fits ({os.path.getsize(flac_path)/(1024*1024):.1f}MB)")
             else:
-                # Stage 2: Try High-Fidelity MP3 (320kbps)
-                logger.info(f"📁 FLAC still too large. Attempting 320kbps MP3 fallback...")
-                mp3_path = file_path.replace(".wav", ".mp3")
-                await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate="320k")
-                upload_path = mp3_path
-                temp_files.append(mp3_path)
-                logger.info(f"✅ High-Fidelity MP3 generated ({os.path.getsize(mp3_path)/(1024*1024):.1f}MB)")
+                # Stage 2: Quality-Targeted MP3 Fallback
+                # We start at 320k and drop until it fits
+                bitrates = ["320k", "256k", "192k", "128k", "96k"]
+                for br in bitrates:
+                    logger.info(f"📁 FLAC too large. Attempting MP3 @ {br}...")
+                    mp3_path = file_path.replace(".wav", f"_{br}.mp3")
+                    await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate=br)
+                    
+                    if (os.path.getsize(mp3_path) / (1024 * 1024)) < MAX_MB:
+                        upload_path = mp3_path
+                        temp_files.append(mp3_path)
+                        logger.info(f"✅ MP3 @ {br} fits ({os.path.getsize(mp3_path)/(1024*1024):.1f}MB)")
+                        break
+                    else:
+                        if os.path.exists(mp3_path): os.remove(mp3_path)
 
         clean_desc = description[:4000] + ("..." if len(description) > 4000 else "")
         embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=clean_desc, color=discord.Color.dark_grey(), timestamp=datetime.now())
         
-        logger.info(f"📤 Uploading {os.path.basename(upload_path)} to Discord...")
+        # Final check before upload
+        final_size = os.path.getsize(upload_path) / (1024 * 1024)
+        if final_size > 24.9:
+            logger.error(f"❌ File still exceeds Discord limits ({final_size:.1f}MB). Upload will likely fail.")
+        
+        logger.info(f"📤 Uploading {os.path.basename(upload_path)} ({final_size:.1f}MB)...")
         await channel.send(embed=embed, file=discord.File(upload_path))
         logger.info(f"✅ Successfully archived {title} to Discord.")
         
