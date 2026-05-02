@@ -80,6 +80,7 @@ $synth.Dispose()
 
 def _generate_balbolka(text, filename, voice_name):
     """Generates audio using Balabolka Console (balcon.exe)."""
+    print(f"🔄 SAPI5 failed or voice not found. Attempting Balabolka fallback for: {voice_name}")
     abs_filename = os.path.abspath(filename)
     cleaned_text = clean_for_dectalk(text)
     balcon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "balabolka")
@@ -96,12 +97,19 @@ def _generate_sapi5(text, filename, voice_name="ScanSoft Tom_Full_22kHz"):
     cleaned_text = clean_for_dectalk(text)
     unique_id = uuid.uuid4().hex[:8]
     ps_script_path = os.path.join(os.path.dirname(abs_filename), f"temp_ps_{os.getpid()}_{unique_id}.ps1")
+    
+    # We add a check to see if the voice exists. If it doesn't, the script exits with code 1.
     ps_script = f"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$voice_found = $false
+foreach ($v in $synth.GetInstalledVoices()) {{
+    if ($v.VoiceInfo.Name -eq '{voice_name}') {{ $voice_found = $true; break }}
+}}
+if (-not $voice_found) {{ exit 1 }}
 $synth.SetOutputToWaveFile('{abs_filename}')
-try {{ $synth.SelectVoice('{voice_name}') }} catch {{ }}
+$synth.SelectVoice('{voice_name}')
 $synth.Speak('{cleaned_text.replace("'", "''")}')
 $synth.Dispose()
 """
