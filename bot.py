@@ -65,43 +65,55 @@ servers_db = load_db()
 
 # --- Central Repository Helper ---
 async def archive_to_central_repo(title, description, file_path):
-    """Uploads an alert and its audio to the central Discord repository."""
-    logger.info(f"📁 Archiving started: {title} (File: {os.path.basename(file_path)})")
+    """Uploads an alert and its audio to the central Discord repository with multi-stage quality fallbacks."""
+    logger.info(f"📁 Archiving started: {title}")
     channel_id = servers_db.get("__global__", {}).get("archive_channel_id")
     if not channel_id: 
         logger.warning(f"⚠️ Archive channel not set. Skipping archive for: {title}")
         return
     try:
-        # Use get_channel first (cache), then fetch_channel (API)
         channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
-        if not channel:
-            logger.error(f"❌ Could not find archive channel {channel_id}")
-            return
-
+        
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
         upload_path = file_path
+        temp_files = []
         
-        # Lowered limit to 20MB for safety. Discord bot limit is 25MB.
-        if file_size_mb > 20.0:
-            logger.info(f"📁 File large ({file_size_mb:.1f}MB). Converting to MP3 for archive...")
-            mp3_path = file_path.replace(".wav", ".mp3")
+        # Discord Bot Limit is 25MB. 
+        if file_size_mb > 24.5:
+            from pydub import AudioSegment
             audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
-            await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate="320k")
-            upload_path = mp3_path
-            logger.info(f"✅ Converted to MP3 for archive ({os.path.getsize(upload_path)/(1024*1024):.1f}MB)")
+            
+            # Stage 1: Try Lossless FLAC (Same quality as WAV, ~50% smaller)
+            logger.info(f"📁 WAV too large ({file_size_mb:.1f}MB). Attempting lossless FLAC fallback...")
+            flac_path = file_path.replace(".wav", ".flac")
+            await asyncio.to_thread(audio.export, flac_path, format="flac")
+            
+            if (os.path.getsize(flac_path) / (1024 * 1024)) < 24.5:
+                upload_path = flac_path
+                temp_files.append(flac_path)
+                logger.info(f"✅ Lossless FLAC generated ({os.path.getsize(flac_path)/(1024*1024):.1f}MB)")
+            else:
+                # Stage 2: Try High-Fidelity MP3 (320kbps)
+                logger.info(f"📁 FLAC still too large. Attempting 320kbps MP3 fallback...")
+                mp3_path = file_path.replace(".wav", ".mp3")
+                await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate="320k")
+                upload_path = mp3_path
+                temp_files.append(mp3_path)
+                logger.info(f"✅ High-Fidelity MP3 generated ({os.path.getsize(mp3_path)/(1024*1024):.1f}MB)")
 
         clean_desc = description[:4000] + ("..." if len(description) > 4000 else "")
         embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=clean_desc, color=discord.Color.dark_grey(), timestamp=datetime.now())
         
-        logger.info(f"📤 Sending to Discord archive channel...")
+        logger.info(f"📤 Uploading {os.path.basename(upload_path)} to Discord...")
         await channel.send(embed=embed, file=discord.File(upload_path))
         logger.info(f"✅ Successfully archived {title} to Discord.")
         
-        if upload_path != file_path and os.path.exists(upload_path):
-            os.remove(upload_path)
+        # Cleanup temporary conversion files
+        for f in temp_files:
+            if os.path.exists(f): os.remove(f)
             
     except Exception as e: 
-        logger.error(f"❌ Central Repo Error while archiving '{title}': {e}")
+        logger.error(f"❌ Central Repo Archiving Failure: {e}")
 
 # Configure bot
 intents = discord.Intents.default()
