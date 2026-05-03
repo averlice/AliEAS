@@ -49,47 +49,54 @@ def clean_for_dectalk(text):
     return text
 
 def get_available_voices():
-    """Returns a list of available SAPI5 voice names using the 32-bit PS bridge."""
+    """Returns a list of all available voices (SAPI5 from system + SAPI4 from Balabolka)."""
     import uuid
     bot_dir = os.path.dirname(os.path.abspath(__file__))
     unique_id = uuid.uuid4().hex[:8]
-    ps_script_path = os.path.join(bot_dir, f"temp_list_{unique_id}.ps1")
     
-    ps_script = """
-Add-Type -AssemblyName System.Speech
-$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-foreach ($voice in $synth.GetInstalledVoices()) {
-    if ($voice.Enabled) { Write-Output $voice.VoiceInfo.Name }
-}
-$synth.Dispose()
-"""
-    with open(ps_script_path, "w", encoding="utf-8") as f:
-        f.write(ps_script)
-        
+    # 1. Get SAPI5 Voices via PS
+    voices = []
+    ps_script_path = os.path.join(bot_dir, f"temp_list_{unique_id}.ps1")
+    ps_script = "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; foreach ($voice in $synth.GetInstalledVoices()) { if ($voice.Enabled) { Write-Output $voice.VoiceInfo.Name } }; $synth.Dispose()"
+    with open(ps_script_path, "w", encoding="utf-8") as f: f.write(ps_script)
     ps_exe = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
     try:
-        result = subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], 
-                               capture_output=True, text=True, check=True)
-        voices = [line.strip() for line in result.stdout.split('\n') if line.strip()]
-        return voices
-    except Exception as e:
-        print(f"Error listing voices: {e}")
-        return ["ScanSoft Tom_Full_22kHz"]
+        res = subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], capture_output=True, text=True)
+        voices += [l.strip() for l in res.stdout.split('\n') if l.strip()]
+    except: pass
     finally:
         if os.path.exists(ps_script_path): os.remove(ps_script_path)
 
+    # 2. Get SAPI4 Voices via Balabolka
+    balcon_path = os.path.join(bot_dir, "balabolka", "balcon.exe")
+    if os.path.exists(balcon_path):
+        try:
+            # -l lists SAPI4 voices
+            res = subprocess.run([balcon_path, "-l"], capture_output=True, text=True)
+            voices += [l.strip() for l in res.stdout.split('\n') if l.strip() and not l.startswith("SAPI 4:")]
+        except: pass
+        
+    return sorted(list(set(voices))) if voices else ["ScanSoft Tom_Full_22kHz"]
+
 def _generate_balbolka(text, filename, voice_name):
-    """Generates audio using Balabolka Console (balcon.exe)."""
-    print(f"🔄 SAPI5 failed or voice not found. Attempting Balabolka fallback for: {voice_name}")
+    """Generates audio using Balabolka Console, supporting both SAPI5 and SAPI4."""
     abs_filename = os.path.abspath(filename)
     cleaned_text = clean_for_dectalk(text)
-    balcon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "balabolka")
-    balcon_path = os.path.join(balcon_dir, "balcon.exe")
+    bot_dir = os.path.dirname(os.path.abspath(__file__))
+    balcon_path = os.path.join(bot_dir, "balabolka", "balcon.exe")
     if not os.path.exists(balcon_path): return False
+    
+    print(f"🔄 Attempting Balabolka fallback for: {voice_name}")
     try:
-        subprocess.run([balcon_path, "-n", voice_name, "-w", abs_filename, "-t", cleaned_text], check=True, capture_output=True)
-        return True
-    except: return False
+        # Try SAPI5 first (-n)
+        res = subprocess.run([balcon_path, "-n", voice_name, "-w", abs_filename, "-t", cleaned_text], capture_output=True)
+        if res.returncode == 0 and os.path.exists(abs_filename): return True
+        
+        # If SAPI5 fails, try SAPI4 (-m)
+        res = subprocess.run([balcon_path, "-m", voice_name, "-w", abs_filename, "-t", cleaned_text], capture_output=True)
+        if res.returncode == 0 and os.path.exists(abs_filename): return True
+    except: pass
+    return False
 
 def _generate_sapi5(text, filename, voice_name="ScanSoft Tom_Full_22kHz"):
     import uuid
