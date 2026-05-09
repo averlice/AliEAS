@@ -88,13 +88,13 @@ async def archive_to_central_repo(title, description, file_path):
         upload_path = file_path
         temp_files = []
         
-        # Discord Bot Limit is 25MB. We use 24MB as a hard safety ceiling.
+        # Discord Bot Limit is 25MB. 
         MAX_MB = 24.0
         if file_size_mb > MAX_MB:
             from pydub import AudioSegment
             audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
             
-            # Stage 1: Try Lossless FLAC (Lossless quality, ~50% size reduction)
+            # Stage 1: Try Lossless FLAC
             logger.info(f"📁 WAV too large ({file_size_mb:.1f}MB). Attempting lossless FLAC...")
             flac_path = file_path.replace(".wav", ".flac")
             await asyncio.to_thread(audio.export, flac_path, format="flac")
@@ -104,11 +104,10 @@ async def archive_to_central_repo(title, description, file_path):
                 temp_files.append(flac_path)
                 logger.info(f"✅ Lossless FLAC fits ({os.path.getsize(flac_path)/(1024*1024):.1f}MB)")
             else:
-                # Stage 2: Quality-Targeted MP3 Fallback
-                # We start at 320k and drop until it fits
+                # Stage 2: MP3 Fallback loop
                 bitrates = ["320k", "256k", "192k", "128k", "96k"]
                 for br in bitrates:
-                    logger.info(f"📁 FLAC too large. Attempting MP3 @ {br}...")
+                    logger.info(f"📁 FLAC still too large. Attempting MP3 @ {br}...")
                     mp3_path = file_path.replace(".wav", f"_{br}.mp3")
                     await asyncio.to_thread(audio.export, mp3_path, format="mp3", bitrate=br)
                     
@@ -123,16 +122,10 @@ async def archive_to_central_repo(title, description, file_path):
         clean_desc = description[:4000] + ("..." if len(description) > 4000 else "")
         embed = discord.Embed(title=f"📦 ARCHIVE: {title}", description=clean_desc, color=discord.Color.dark_grey(), timestamp=datetime.now())
         
-        # Final check before upload
-        final_size = os.path.getsize(upload_path) / (1024 * 1024)
-        if final_size > 24.9:
-            logger.error(f"❌ File still exceeds Discord limits ({final_size:.1f}MB). Upload will likely fail.")
-        
-        logger.info(f"📤 Uploading {os.path.basename(upload_path)} ({final_size:.1f}MB)...")
+        logger.info(f"📤 Uploading to Discord...")
         await channel.send(embed=embed, file=discord.File(upload_path))
         logger.info(f"✅ Successfully archived {title} to Discord.")
         
-        # Cleanup temporary conversion files
         for f in temp_files:
             if os.path.exists(f): os.remove(f)
             
@@ -158,6 +151,7 @@ async def perform_startup_cleanup():
     
     logger.info("🧹 Performing startup cleanup of archive folder...")
     try:
+        # We list and delete in threads to keep the event loop fast
         files = await asyncio.to_thread(os.listdir, ARCHIVE_DIR)
         for f in files:
             if f.endswith(".wav") or f.endswith(".mp3") or f.endswith(".flac"):
@@ -230,7 +224,7 @@ async def trigger_global_test(trigger_source="Web UI"):
             shutil.copy(base_fn, gfn)
             vc.play(discord.FFmpegPCMAudio(source=gfn), after=lambda e: safe_delete(gfn))      
         
-        # Base file cleanup after archive and all copies are made
+        # Base file cleanup
         safe_delete(base_fn)
     except Exception as e:
         logger.error(f"Global test error: {e}")
@@ -263,11 +257,8 @@ async def on_ready():
     if not os.path.exists(ARCHIVE_DIR): os.makedirs(ARCHIVE_DIR)
     if not os.path.exists("sounds"): os.makedirs("sounds")
     
-    # Startup Cleanup: Clear out old WAV files to save space
-    logger.info("🧹 Performing startup cleanup of archive folder...")
-    for f in os.listdir(ARCHIVE_DIR):
-        if f.endswith(".wav") or f.endswith(".mp3") or f.endswith(".flac"):
-            safe_delete(os.path.join(ARCHIVE_DIR, f))
+    # Run cleanup in the background so it doesn't block the bot's heartbeat
+    bot.loop.create_task(perform_startup_cleanup())
 
     bot.loop.create_task(start_web_server())
     for gid, cfg in servers_db.items():
