@@ -147,7 +147,24 @@ bot = commands.Bot(command_prefix='fco!', intents=intents, help_command=None, ow
 
 # --- State Variables ---
 seen_alerts = set()
+done_startup_cleanup = False
 URGENT_EVENTS = ["Tornado Warning", "Flash Flood Warning", "Severe Thunderstorm Warning", "Tsunami Warning", "Civil Emergency Message", "Evacuation Immediate", "Shelter in Place Warning", "AMBER Alert", "Nuclear Power Plant Warning", "Hazardous Materials Warning", "Fire Warning"]
+
+async def perform_startup_cleanup():
+    """Background task to wipe old audio files and save space."""
+    global done_startup_cleanup
+    if done_startup_cleanup: return
+    done_startup_cleanup = True
+    
+    logger.info("🧹 Performing startup cleanup of archive folder...")
+    try:
+        files = await asyncio.to_thread(os.listdir, ARCHIVE_DIR)
+        for f in files:
+            if f.endswith(".wav") or f.endswith(".mp3") or f.endswith(".flac"):
+                await asyncio.to_thread(safe_delete, os.path.join(ARCHIVE_DIR, f))
+        logger.info("✅ Startup cleanup complete.")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
 
 # --- Web Server (ENDEC Dashboard) ---
 WEB_SESSION_KEY = os.urandom(32)
