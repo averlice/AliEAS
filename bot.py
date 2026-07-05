@@ -141,7 +141,7 @@ bot = commands.Bot(command_prefix='fco!', intents=intents, help_command=None, ow
 # --- State Variables ---
 seen_alerts = set()
 done_startup_cleanup = False
-URGENT_EVENTS = ["Tornado Warning", "Flash Flood Warning", "Severe Thunderstorm Warning", "Tsunami Warning", "Civil Emergency Message", "Evacuation Immediate", "Shelter in Place Warning", "AMBER Alert", "Nuclear Power Plant Warning", "Hazardous Materials Warning", "Fire Warning"]
+URGENT_EVENTS = ["Tornado Warning", "Flash Flood Warning", "Severe Thunderstorm Warning", "Tsunami Warning", "Civil Emergency Message", "Evacuation Immediate", "Shelter in Place Warning", "AMBER Alert"]
 
 async def perform_startup_cleanup():
     """Background task to wipe old audio files and save space."""
@@ -172,7 +172,7 @@ async def discord_callback(request):
     code = request.query.get("code")
     client_id, client_secret, redirect_uri = os.getenv("DISCORD_CLIENT_ID"), os.getenv("DISCORD_CLIENT_SECRET"), os.getenv("REDIRECT_URI")
     async with aiohttp.ClientSession() as session:
-        async with session.post("https://discord.com/api/oauth2/token", data={"client_id": client_id, "client_secret": client_secret, "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}) as resp: 
+        async with session.post("https://discord.com/api/oauth2/token", data={"client_id": client_id, "client_secret": client_secret, "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}) as resp:
             token_data = await resp.json()
             access_token = token_data.get("access_token")
         async with session.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {access_token}"}) as resp:
@@ -188,7 +188,7 @@ async def require_auth(request):
 
 async def web_index(request):
     await require_auth(request)
-    html = f"<html><body style='font-family:monospace;background:#121212;color:#00ff00;padding:20px'><h1>EAS ENDEC v{BOT_VERSION}</h1><p>Servers: {len(servers_db)-1}</p><form action='/test' method='post'><button type='submit'>Global Test</button></form><form action='/stop' method='post'><button type='submit'>Stop All</button></form><h2>Cloud Archive Only</h2><p>Local files are automatically deleted to save space. Check the designated Discord channel for alert logs.</p></body></html>"
+    html = f"<html><body style='font-family:monospace;background:#121212;color:#00ff00;padding:20px'><h1>EAS ENDEC v{BOT_VERSION}</h1><p>Servers: {len(servers_db)-1}</p><form action='/test' method='post'><button>Test</button></form><form action='/stop' method='post'><button>Stop Audio</button></form><form action='/poll' method='post'><button>Force Poll</button></form></body></html>"
     return web.Response(text=html, content_type='text/html')
 
 async def web_serve_archive(request):
@@ -257,6 +257,16 @@ async def on_ready():
     if not os.path.exists(ARCHIVE_DIR): os.makedirs(ARCHIVE_DIR)
     if not os.path.exists("sounds"): os.makedirs("sounds")
     
+    # Clean up any zombie voice connections before starting
+    logger.info("🧹 Cleaning up zombie voice connections...")
+    for vc in bot.voice_clients:
+        if not vc.is_connected():
+            try:
+                await vc.disconnect()
+                logger.info(f"Cleaned up disconnected VC in {vc.guild.name}")
+            except Exception as e:
+                logger.warning(f"Error cleaning zombie connection: {e}")
+    
     # Run cleanup in the background so it doesn't block the bot's heartbeat
     bot.loop.create_task(perform_startup_cleanup())
 
@@ -267,9 +277,12 @@ async def on_ready():
         if vcid:
             chan = bot.get_channel(vcid)
             if chan:
-                try: await chan.connect(self_deaf=True)
-                except: pass
+                try: 
+                    await chan.connect(self_deaf=True)
+                except Exception as e:
+                    logger.warning(f"Initial connection to {chan.name} in {chan.guild.name} failed: {e}")
     if not check_nws_alerts.is_running(): check_nws_alerts.start()
+    if not voice_heartbeat.is_running(): voice_heartbeat.start()
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -336,7 +349,7 @@ async def help(ctx):
     embed.add_field(name="🎙️ General", value="`fco!join`, `fco!leave`, `fco!active`, `fco!history`, `fco!weather`, `fco!stop`, `fco!status`, `fco!voices`, `fco!voice`", inline=False)
     embed.add_field(name="⚙️ Admin", value="`fco!setup <ZIP>`, `fco!test`, `fco!setvoice <Name>`, `fco!introsound`, `fco!outrosound` ", inline=False)
     if await bot.is_owner(ctx.author):
-        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!introsound`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`, `fco!globalvoice` ", inline=False)
+        embed.add_field(name="👑 Owner", value="`fco!testg`, `fco!pipe`, `fco!archive <ID>`, `fco!introsound`, `fco!serverslist`, `fco!freshpull`, `fco!restart`, `fco!shutdown`, `fco!getlogs`", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -355,7 +368,7 @@ async def setup(ctx, zip_code: str = None):
             zone = pres['properties']['county'].split('/')[-1]
     except: return await ctx.send("❌ Setup failed.")
     if not ctx.author.voice: return await ctx.send("❌ Join a VC first.")
-    servers_db[str(ctx.guild.id)] = {"zone": zone, "place_name": pn, "text_channel_id": ctx.channel.id, "voice_channel_id": ctx.author.voice.channel.id, "guild_name": ctx.guild.name, "zip_code": zip_code, "voice": DEFAULT_VOICE, "intro_path": None, "outro_path": None}
+    servers_db[str(ctx.guild.id)] = {"zone": zone, "place_name": pn, "text_channel_id": ctx.channel.id, "voice_channel_id": ctx.author.voice.channel.id, "guild_name": ctx.guild.name, "zip_code": zip_code}
     save_db(servers_db)
     if not ctx.voice_client: await ctx.author.voice.channel.connect(self_deaf=True)
     await ctx.send(f"✅ Setup Complete!")
@@ -616,8 +629,9 @@ async def getlogs(ctx):
 
 last_weekly_test_date = None
 
-@tasks.loop(minutes=2.0)
+@tasks.loop(minutes=10.0)
 async def check_nws_alerts():
+    """Check NWS for alerts. Increased to 10 min to reduce aggressive reconnects."""
     global last_weekly_test_date
     now = datetime.now(pytz.timezone("US/Mountain"))
     if now.weekday() == 2 and now.hour == 9 and now.minute >= 30:
@@ -689,7 +703,7 @@ async def check_nws_alerts():
                                     embed = discord.Embed(title=f"🚨 {a.get('event')}", description=a.get('headline'), color=color)
                                     bot.loop.create_task(tchan.send(embed=embed))
                                     
-                                # Play in Voice
+                                # Play in Voice - only if connected and not playing
                                 vc = guild.voice_client
                                 if vc and vc.is_connected() and not vc.is_playing():
                                     play_fn = os.path.abspath(f"{ARCHIVE_DIR}/play_{guild.id}_{ts_str}.wav")
@@ -702,7 +716,7 @@ async def check_nws_alerts():
             except Exception as e:
                 logger.error(f"API/Alert loop error for zone {z}: {e}")
                 
-    # Watchdog for dead connections
+    # Watchdog for dead connections - improved to avoid reconnecting while playing
     for gid, cfg in servers_db.items():
         if gid.startswith("__"): continue
         guild = bot.get_guild(int(gid))
@@ -710,13 +724,31 @@ async def check_nws_alerts():
             vc, vcid = guild.voice_client, cfg.get("voice_channel_id")
             if vcid:
                 chan = guild.get_channel(vcid)
+                # Only reconnect if truly disconnected AND not currently playing
                 if chan and (not vc or not vc.is_connected()):
-                    try: await chan.connect(self_deaf=True)
-                    except Exception as e:
-                        logger.error(f"Watchdog connect error in {guild.name}: {e}")
+                    if not vc or not vc.is_playing():
+                        try: 
+                            await chan.connect(self_deaf=True)
+                            logger.info(f"Watchdog reconnected {guild.name}")
+                        except Exception as e:
+                            logger.warning(f"Watchdog connect error in {guild.name}: {e}")
+
+@tasks.loop(minutes=1.0)
+async def voice_heartbeat():
+    """Keeps voice connections alive by checking their status periodically."""
+    for vc in bot.voice_clients:
+        if vc and vc.is_connected():
+            try:
+                # Just check the status, don't send anything
+                _ = vc.latency
+            except Exception as e:
+                logger.warning(f"VC latency check failed in {vc.guild.name}, may need reconnect: {e}")
 
 @check_nws_alerts.before_loop
 async def before_check_nws_alerts(): await bot.wait_until_ready()
+
+@voice_heartbeat.before_loop
+async def before_voice_heartbeat(): await bot.wait_until_ready()
 
 if __name__ == '__main__':
     if TOKEN: bot.run(TOKEN)
