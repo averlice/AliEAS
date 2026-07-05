@@ -48,20 +48,42 @@ def clean_for_dectalk(text):
         
     return text
 
+def _detect_flite_voices():
+    """Detects available flite voices on the system."""
+    try:
+        import flite.voice
+        # Get list of available voices
+        voices = []
+        # Standard flite voices
+        standard_voices = ['kal', 'kal16', 'awb', 'rms', 'slt']
+        
+        for voice_name in standard_voices:
+            try:
+                # Try to load the voice to verify it exists
+                voice = flite.voice.Voice(voice_name)
+                voices.append(f"flite_{voice_name}")
+            except:
+                pass
+        
+        return voices
+    except ImportError:
+        return []
+
 def get_available_voices():
-    """Returns a list of all available voices (SAPI5 from system + SAPI4 from Balabolka)."""
+    """Returns a list of all available voices (SAPI5 + Balabolka + Flite)."""
     import uuid
     bot_dir = os.path.dirname(os.path.abspath(__file__))
     unique_id = uuid.uuid4().hex[:8]
     
-    # 1. Get SAPI5 Voices via PS
     voices = []
+    
+    # 1. Get SAPI5 Voices via PS
     ps_script_path = os.path.join(bot_dir, f"temp_list_{unique_id}.ps1")
-    ps_script = "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; foreach ($voice in $synth.GetInstalledVoices()) { if ($voice.Enabled) { Write-Output $voice.VoiceInfo.Name } }; $synth.Dispose()"
+    ps_script = "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; foreach ($voice in $synth.GetInstalledVoices()) { if ($voice.Enabled) { Write-Output $voice.VoiceInfo.Name }}"
     with open(ps_script_path, "w", encoding="utf-8") as f: f.write(ps_script)
     ps_exe = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
     try:
-        res = subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], capture_output=True, text=True)
+        res = subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], capture_output=True, text=True, timeout=5)
         voices += [l.strip() for l in res.stdout.split('\n') if l.strip()]
     except: pass
     finally:
@@ -72,11 +94,40 @@ def get_available_voices():
     if os.path.exists(balcon_path):
         try:
             # -l lists SAPI4 voices
-            res = subprocess.run([balcon_path, "-l"], capture_output=True, text=True)
+            res = subprocess.run([balcon_path, "-l"], capture_output=True, text=True, timeout=5)
             voices += [l.strip() for l in res.stdout.split('\n') if l.strip() and not l.startswith("SAPI 4:")]
         except: pass
-        
+    
+    # 3. Get Flite Voices
+    flite_voices = _detect_flite_voices()
+    voices += flite_voices
+    
     return sorted(list(set(voices))) if voices else ["ScanSoft Tom_Full_22kHz"]
+
+def _generate_flite(text, filename, voice_name):
+    """Generates audio using Flite TTS."""
+    try:
+        import flite.voice
+        
+        # Extract the base voice name (remove 'flite_' prefix if present)
+        base_voice = voice_name.replace('flite_', '')
+        
+        print(f"🔄 Generating audio with Flite voice: {base_voice}")
+        
+        # Load voice and synthesize
+        voice = flite.voice.Voice(base_voice)
+        cg = voice.load_lex()
+        cg.synth(text)
+        
+        # Save to WAV file
+        abs_filename = os.path.abspath(filename)
+        cg.save_wav(abs_filename)
+        
+        if os.path.exists(abs_filename):
+            return True
+    except Exception as e:
+        print(f"❌ Flite generation failed: {e}")
+        return False
 
 def _generate_balbolka(text, filename, voice_name):
     """Generates audio using Balabolka Console, supporting both SAPI5 and SAPI4."""
@@ -89,11 +140,11 @@ def _generate_balbolka(text, filename, voice_name):
     print(f"🔄 Attempting Balabolka fallback for: {voice_name}")
     try:
         # Try SAPI5 first (-n)
-        res = subprocess.run([balcon_path, "-n", voice_name, "-w", abs_filename, "-t", cleaned_text], capture_output=True)
+        res = subprocess.run([balcon_path, "-n", voice_name, "-w", abs_filename, "-t", cleaned_text], capture_output=True, timeout=30)
         if res.returncode == 0 and os.path.exists(abs_filename): return True
         
         # If SAPI5 fails, try SAPI4 (-m)
-        res = subprocess.run([balcon_path, "-m", voice_name, "-w", abs_filename, "-t", cleaned_text], capture_output=True)
+        res = subprocess.run([balcon_path, "-m", voice_name, "-w", abs_filename, "-t", cleaned_text], capture_output=True, timeout=30)
         if res.returncode == 0 and os.path.exists(abs_filename): return True
     except: pass
     return False
@@ -123,16 +174,36 @@ $synth.Dispose()
     with open(ps_script_path, "w", encoding="utf-8") as f: f.write(ps_script)
     ps_exe = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
     try:
-        subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], check=True, capture_output=True)
+        subprocess.run([ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_path], check=True, capture_output=True, timeout=30)
         return True
     except: return False
     finally:
         if os.path.exists(ps_script_path): os.remove(ps_script_path)
 
 def generate_voice_with_fallback(text, filename, voice_name, default_voice="ScanSoft Tom_Full_22kHz"):
-    if _generate_sapi5(text, filename, voice_name): return filename
-    if _generate_balbolka(text, filename, voice_name): return filename
-    if voice_name != default_voice: _generate_sapi5(text, filename, default_voice)
+    """Try multiple TTS engines in fallback order: native -> Flite -> Balabolka -> SAPI5 default."""
+    # If it's a flite voice, try flite first
+    if voice_name.startswith('flite_'):
+        if _generate_flite(text, filename, voice_name):
+            return filename
+    
+    # Try SAPI5
+    if _generate_sapi5(text, filename, voice_name):
+        return filename
+    
+    # Try Flite (if not already tried)
+    if not voice_name.startswith('flite_'):
+        if _generate_flite(text, filename, voice_name):
+            return filename
+    
+    # Try Balabolka
+    if _generate_balbolka(text, filename, voice_name):
+        return filename
+    
+    # Final fallback: use default voice
+    if voice_name != default_voice:
+        _generate_sapi5(text, filename, default_voice)
+    
     return filename
 
 def generate_eas_message(text, output_filename="alert.wav", pre_speech=None, voice="ScanSoft Tom_Full_22kHz", intro_path=None, outro_path=None):
