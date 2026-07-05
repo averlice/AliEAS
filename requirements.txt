@@ -11,4 +11,3 @@ cryptography
 numpy
 beautifulsoup4
 davey
-flite

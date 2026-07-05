@@ -30,6 +30,7 @@ pip install -r requirements.txt
 ### 2. External Dependencies
 *   **FFmpeg:** You must have `ffmpeg` installed and added to your system PATH for `discord.py` and `pydub` to process audio.
 *   **ScanSoft Tom (Optional but Recommended):** The bot is hardcoded to look for the 32-bit `ScanSoft Tom_Full_22kHz` SAPI5 voice in the Windows Registry. If you do not have this voice, you will need to modify `eas_audio.py` to point to a different TTS engine or a 64-bit voice.
+*   **CMU Flite (Optional):** To use `flite_kal`, `flite_kal16`, `flite_awb`, `flite_rms`, or `flite_slt`, install the native CMU Flite executable and either add `flite.exe` to PATH or place it at `flite.exe` / `flite/flite.exe` in the repo root. The PyPI package named `flite` is not CMU Flite TTS and should not be installed for this bot.
 
 ### 3. Environment Variables (.env)
 Create a `.env` file in the root directory with the following variables:

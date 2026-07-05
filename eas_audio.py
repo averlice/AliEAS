@@ -1,6 +1,7 @@
 import os
 import subprocess
 import re
+import shutil
 from pydub import AudioSegment
 from EASGen import EASGen
 
@@ -48,26 +49,24 @@ def clean_for_dectalk(text):
         
     return text
 
+FLITE_VOICES = ("kal", "kal16", "awb", "rms", "slt")
+
+def _find_flite_executable():
+    """Finds a native CMU Flite executable."""
+    bot_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(bot_dir, "flite", "flite.exe"),
+        os.path.join(bot_dir, "flite.exe"),
+        shutil.which("flite"),
+        shutil.which("flite.exe"),
+    ]
+    return next((path for path in candidates if path and os.path.exists(path)), None)
+
 def _detect_flite_voices():
-    """Detects available flite voices on the system."""
-    try:
-        import flite.voice
-        # Get list of available voices
-        voices = []
-        # Standard flite voices
-        standard_voices = ['kal', 'kal16', 'awb', 'rms', 'slt']
-        
-        for voice_name in standard_voices:
-            try:
-                # Try to load the voice to verify it exists
-                voice = flite.voice.Voice(voice_name)
-                voices.append(f"flite_{voice_name}")
-            except:
-                pass
-        
-        return voices
-    except ImportError:
+    """Detects available native Flite voices."""
+    if not _find_flite_executable():
         return []
+    return [f"flite_{voice}" for voice in FLITE_VOICES]
 
 def get_available_voices():
     """Returns a list of all available voices (SAPI5 + Balabolka + Flite)."""
@@ -105,26 +104,27 @@ def get_available_voices():
     return sorted(list(set(voices))) if voices else ["ScanSoft Tom_Full_22kHz"]
 
 def _generate_flite(text, filename, voice_name):
-    """Generates audio using Flite TTS."""
+    """Generates audio using native CMU Flite."""
+    flite_path = _find_flite_executable()
+    if not flite_path:
+        return False
+
+    base_voice = voice_name.replace('flite_', '')
+    if base_voice not in FLITE_VOICES:
+        return False
+
     try:
-        import flite.voice
-        
-        # Extract the base voice name (remove 'flite_' prefix if present)
-        base_voice = voice_name.replace('flite_', '')
-        
         print(f"🔄 Generating audio with Flite voice: {base_voice}")
-        
-        # Load voice and synthesize
-        voice = flite.voice.Voice(base_voice)
-        cg = voice.load_lex()
-        cg.synth(text)
         
         # Save to WAV file
         abs_filename = os.path.abspath(filename)
-        cg.save_wav(abs_filename)
-        
-        if os.path.exists(abs_filename):
-            return True
+        cleaned_text = clean_for_dectalk(text)
+        res = subprocess.run(
+            [flite_path, "-voice", base_voice, "-t", cleaned_text, "-o", abs_filename],
+            capture_output=True,
+            timeout=30,
+        )
+        return res.returncode == 0 and os.path.exists(abs_filename)
     except Exception as e:
         print(f"❌ Flite generation failed: {e}")
         return False
