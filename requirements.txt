@@ -12,3 +12,4 @@ numpy
 beautifulsoup4
 davey
 flite
+urllib3>=2.0,<3.0
